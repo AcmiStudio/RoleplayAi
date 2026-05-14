@@ -14,14 +14,15 @@ pkg update -y && pkg upgrade -y
 
 # 2. Установка Python и pip
 echo ""
-echo "[2/5] Установка Python..."
+echo "[2/5] Установка Python, Ollama..."
 pkg install python -y
-
+pkg install iproute2 -y
+pkg install ollama -y
 # 3. Установка Python-зависимостей через pip
 echo ""
 echo "[3/5] Установка Python-модулей (websockets, colorama, aiohttp)..."
 pip install --upgrade pip
-pip install websockets colorama aiohttp ollama websockets
+pip install websockets colorama aiohttp websockets
 
 # 4. Создание структуры папок и settings.json по умолчанию
 echo ""
@@ -55,7 +56,8 @@ fi
 echo ""
 echo "[5/5] Проверка Ollama..."
 if command -v ollama &> /dev/null; then
-    echo "   Ollama установлена."
+    echo "   Ollama установлена. Войдите в систему Ollama"
+    echo "   Внимание! После того как пропишите ollama serve, в другой сессии запустите приложение."
     echo "   Рекомендуется загрузить модель (если ещё не):"
     echo "   ollama pull gemma4:31b-cloud  (или ваша модель)"
 else
@@ -63,6 +65,7 @@ else
     echo "   Для работы ИИ-рассказчика необходим сервер Ollama."
     echo "   Вы можете запустить его на другом устройстве и указать"
     echo "   адрес в коде сервера (пока что настроено на localhost:11434)."
+    
 fi
 
 echo ""

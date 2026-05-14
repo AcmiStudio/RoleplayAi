@@ -25,48 +25,65 @@ except ImportError:
 def get_local_ip():
     """
     Кроссплатформенное получение локального IP (не 127.0.0.1).
-    Для Linux/Android пытается получить IP wlan0, для Windows – через hostname.
+    Для Linux/Android в первую очередь ищет IP на интерфейсах с флагом UP.
+    Для Windows – стандартный hostname.
+    Если не найден – возвращает 127.0.0.1.
     """
     system = platform.system()
-    try:
-        if system == "Windows":
-            # Windows: стандартный способ через hostname
-            hostname = socket.gethostname()
-            return socket.gethostbyname(hostname)
-        else:
-            # Linux / Android (Termux)
-            # Способ 1: ip addr show wlan0
-            try:
-                result = subprocess.run(
-                    ["ip", "addr", "show", "wlan0"],
-                    capture_output=True, text=True, timeout=5
-                )
-                if result.returncode == 0:
-                    for line in result.stdout.split('\n'):
-                        line = line.strip()
-                        if line.startswith("inet "):
-                            return line.split()[1].split('/')[0]
-            except:
-                pass
-            # Способ 2: hostname -I (возвращает все IP, берём первый не 127.0.0.1)
-            try:
-                result = subprocess.run(
-                    ["hostname", "-I"],
-                    capture_output=True, text=True, timeout=5
-                )
-                if result.returncode == 0:
-                    ips = result.stdout.strip().split()
-                    for ip in ips:
-                        if ip != "127.0.0.1" and not ip.startswith("172."):  # 172. – часто Docker
-                            return ip
-                    # Если только 127.0.0.1, вернём его (но такого быть не должно)
-                    if ips:
-                        return ips[0]
-            except:
-                pass
-            # Запасной вариант
+    if system == "Windows":
+        try:
             return socket.gethostbyname(socket.gethostname())
-    except Exception as e:
+        except:
+            return "127.0.0.1"
+    else:
+        # Способ 1: ищем IPv4 на интерфейсах с флагом UP (кроме loopback)
+        try:
+            result = subprocess.run(
+                ["ip", "-o", "addr", "show", "up"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                for line in result.stdout.split('\n'):
+                    if 'inet ' in line and '127.0.0.1' not in line:
+                        parts = line.strip().split()
+                        for i, part in enumerate(parts):
+                            if part == 'inet':
+                                ip = parts[i+1].split('/')[0]
+                                if not ip.startswith("172."):  # отсекаем Docker
+                                    return ip
+        except:
+            pass
+
+        # Способ 2: ip route (если первый не сработал)
+        try:
+            result = subprocess.run(
+                ["ip", "route", "get", "1.1.1.1"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                words = result.stdout.split()
+                if "src" in words:
+                    idx = words.index("src")
+                    return words[idx + 1]
+        except:
+            pass
+
+        # Способ 3: hostname -I
+        try:
+            result = subprocess.run(
+                ["hostname", "-I"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                ips = result.stdout.strip().split()
+                for ip in ips:
+                    if not ip.startswith("127.") and not ip.startswith("172."):
+                        return ip
+                if ips:
+                    return ips[0]
+        except:
+            pass
+
         return "127.0.0.1"
 
 
@@ -136,7 +153,7 @@ class RPGGameServer:
                         if self.ollama_model in models:
                             return True
                         else:
-                            return False  # модель не найдена, но сервер жив
+                            return False
                     else:
                         return False
         except Exception:
