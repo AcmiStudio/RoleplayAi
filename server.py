@@ -1,11 +1,12 @@
 """
-server.py – Полный сервер RPG (кроссплатформенный IP, мягкая проверка Ollama, цвета)
+server.py – Полный сервер RPG (правильный локальный IP для Windows, устойчивость)
 """
 import asyncio
 import json
 import socket
 import subprocess
 import platform
+import re
 from datetime import datetime
 from config import Config
 from utils import ConsoleUI
@@ -24,19 +25,53 @@ except ImportError:
 
 def get_local_ip():
     """
-    Кроссплатформенное получение локального IP (не 127.0.0.1).
-    Для Linux/Android в первую очередь ищет IP на интерфейсах с флагом UP.
-    Для Windows – стандартный hostname.
-    Если не найден – возвращает 127.0.0.1.
+    Возвращает локальный IP, доступный в частной сети (предпочитает Wi‑Fi/Ethernet).
+    Для Windows – парсит ipconfig, для Linux/Android – ip addr show up.
     """
     system = platform.system()
     if system == "Windows":
         try:
+            result = subprocess.run(
+                ["ipconfig"],
+                capture_output=True, text=True, timeout=10,
+                encoding="cp866", errors="replace"  # корректная кодировка для русской Windows
+            )
+            output = result.stdout
+            # Ищем все адаптеры и их IPv4-адреса
+            adapters = re.split(r'\r?\n(?=\S)', output)  # разделяем на блоки адаптеров
+            for adapter in adapters:
+                # Виртуальные адаптеры часто содержат ключевые слова, пропускаем их
+                if any(skip in adapter.lower() for skip in
+                       ["virtual", "vmware", "virtualbox", "hyper-v", "bluetooth", "loopback"]):
+                    continue
+                # Ищем строку с IPv4
+                ip_match = re.search(r'IPv4[^:]*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)', adapter)
+                if ip_match:
+                    ip = ip_match.group(1)
+                    if not ip.startswith("127.") and not ip.startswith("169.254."):  # игнорируем loopback и APIPA
+                        # Проверяем, что IP принадлежит частному диапазону
+                        octets = list(map(int, ip.split('.')))
+                        if (octets[0] == 10 or
+                            (octets[0] == 172 and 16 <= octets[1] <= 31) or
+                            (octets[0] == 192 and octets[1] == 168)):
+                            return ip
+            # Если не нашли частный IP, возвращаем первый не‑loopback
+            for adapter in adapters:
+                ip_match = re.search(r'IPv4[^:]*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)', adapter)
+                if ip_match:
+                    ip = ip_match.group(1)
+                    if not ip.startswith("127.") and not ip.startswith("169.254."):
+                        return ip
+        except Exception as e:
+            pass
+        # Fallback: старый способ
+        try:
             return socket.gethostbyname(socket.gethostname())
         except:
             return "127.0.0.1"
+
     else:
-        # Способ 1: ищем IPv4 на интерфейсах с флагом UP (кроме loopback)
+        # Linux / Android (Termux)
         try:
             result = subprocess.run(
                 ["ip", "-o", "addr", "show", "up"],
@@ -53,22 +88,6 @@ def get_local_ip():
                                     return ip
         except:
             pass
-
-        # Способ 2: ip route (если первый не сработал)
-        try:
-            result = subprocess.run(
-                ["ip", "route", "get", "1.1.1.1"],
-                capture_output=True, text=True, timeout=5
-            )
-            if result.returncode == 0:
-                words = result.stdout.split()
-                if "src" in words:
-                    idx = words.index("src")
-                    return words[idx + 1]
-        except:
-            pass
-
-        # Способ 3: hostname -I
         try:
             result = subprocess.run(
                 ["hostname", "-I"],
@@ -83,7 +102,6 @@ def get_local_ip():
                     return ips[0]
         except:
             pass
-
         return "127.0.0.1"
 
 
@@ -92,7 +110,7 @@ class RPGGameServer:
         self.config = Config()
         self.ui = ConsoleUI()
 
-        self.clients = {}          # {websocket: player_info}
+        self.clients = {}
         self.max_players = 4
         self.game_started = False
         self.turn_mode = "free"
@@ -111,7 +129,6 @@ class RPGGameServer:
         self.turn_mode = turn_mode
         self.world_description = world_description
 
-        # Мягкая проверка Ollama: предупреждаем, но не останавливаем
         if not await self.check_ollama():
             self.ui.print_warning("Ollama недоступна или модель не найдена. Игра может не работать.")
         else:
@@ -142,7 +159,6 @@ class RPGGameServer:
             console_task.cancel()
 
     async def check_ollama(self):
-        """Проверка, что Ollama запущена и модель доступна. Возвращает True/False."""
         url = "http://localhost:11434/api/tags"
         try:
             async with aiohttp.ClientSession() as session:
@@ -150,14 +166,10 @@ class RPGGameServer:
                     if response.status == 200:
                         data = await response.json()
                         models = [m["name"] for m in data.get("models", [])]
-                        if self.ollama_model in models:
-                            return True
-                        else:
-                            return False
-                    else:
-                        return False
-        except Exception:
-            return False
+                        return self.ollama_model in models
+        except:
+            pass
+        return False
 
     async def handle_client(self, websocket):
         if len(self.clients) >= self.max_players:
@@ -208,7 +220,6 @@ class RPGGameServer:
         try:
             data = json.loads(message)
             player_name = self.clients[websocket]["name"]
-
             if data["type"] == "chat":
                 if self.game_started:
                     await self.process_game_message(websocket, data["content"])
@@ -219,16 +230,13 @@ class RPGGameServer:
                         "content": data["content"],
                         "player_color": self.clients[websocket]["color"]
                     })
-
             elif data["type"] == "admin_command":
                 await self.handle_admin_command(websocket, data["command"])
-
         except json.JSONDecodeError:
             self.ui.print_error("Неверный формат сообщения")
 
     async def process_game_message(self, websocket, content):
         player_name = self.clients[websocket]["name"]
-
         if player_name in self.jailed_players:
             await websocket.send(json.dumps({
                 "type": "error",
@@ -280,7 +288,6 @@ class RPGGameServer:
         for client_info in self.clients.values():
             if client_info["name"] not in self.jailed_players:
                 context += f"- {client_info['name']}: {client_info['character']}\n"
-
         context += f"""
 ДЕЙСТВИЕ ИГРОКА:
 {player_name} ({character}) делает: {action}
@@ -330,7 +337,6 @@ class RPGGameServer:
         if not parts:
             return
         cmd = parts[0].lower()
-
         if cmd == "/kick" and len(parts) > 1:
             await self.kick_player(parts[1])
         elif cmd == "/jail" and len(parts) > 1:
@@ -384,9 +390,7 @@ class RPGGameServer:
         if len(self.clients) < 2:
             self.ui.print_error("Нужно минимум 2 игрока")
             return
-
         self.game_started = True
-
         initial_prompt = f"""
 {self.narrator_prompt}
 
@@ -397,13 +401,11 @@ class RPGGameServer:
 в которой оказались персонажи. Создай атмосферу и задай тон повествованию.
 """
         initial_scene = await self.get_ai_response(initial_prompt)
-
         await self.broadcast({
             "type": "game_started",
             "scene": initial_scene,
             "mode": self.turn_mode
         })
-
         if self.turn_mode == "turn":
             if self.clients:
                 first_player = list(self.clients.values())[0]
@@ -433,13 +435,11 @@ class RPGGameServer:
         if websocket in self.clients:
             player_name = self.clients[websocket]["name"]
             del self.clients[websocket]
-
             await self.broadcast({
                 "type": "player_left",
                 "player_name": player_name,
                 "total_players": len(self.clients)
             })
-
             self.ui.print_warning(f"Игрок {player_name} отключился")
 
     async def broadcast(self, message):
