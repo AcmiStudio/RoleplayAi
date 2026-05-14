@@ -1,9 +1,11 @@
 """
-server.py – Полный сервер RPG (HTTP API Ollama, цвета игроков, управление мирами)
+server.py – Полный сервер RPG (кроссплатформенный IP, мягкая проверка Ollama, цвета)
 """
 import asyncio
 import json
 import socket
+import subprocess
+import platform
 from datetime import datetime
 from config import Config
 from utils import ConsoleUI
@@ -18,6 +20,54 @@ except ImportError:
     print("Ошибка: модуль 'websockets' не установлен!")
     print("Установите его командой: pip install websockets")
     exit(1)
+
+
+def get_local_ip():
+    """
+    Кроссплатформенное получение локального IP (не 127.0.0.1).
+    Для Linux/Android пытается получить IP wlan0, для Windows – через hostname.
+    """
+    system = platform.system()
+    try:
+        if system == "Windows":
+            # Windows: стандартный способ через hostname
+            hostname = socket.gethostname()
+            return socket.gethostbyname(hostname)
+        else:
+            # Linux / Android (Termux)
+            # Способ 1: ip addr show wlan0
+            try:
+                result = subprocess.run(
+                    ["ip", "addr", "show", "wlan0"],
+                    capture_output=True, text=True, timeout=5
+                )
+                if result.returncode == 0:
+                    for line in result.stdout.split('\n'):
+                        line = line.strip()
+                        if line.startswith("inet "):
+                            return line.split()[1].split('/')[0]
+            except:
+                pass
+            # Способ 2: hostname -I (возвращает все IP, берём первый не 127.0.0.1)
+            try:
+                result = subprocess.run(
+                    ["hostname", "-I"],
+                    capture_output=True, text=True, timeout=5
+                )
+                if result.returncode == 0:
+                    ips = result.stdout.strip().split()
+                    for ip in ips:
+                        if ip != "127.0.0.1" and not ip.startswith("172."):  # 172. – часто Docker
+                            return ip
+                    # Если только 127.0.0.1, вернём его (но такого быть не должно)
+                    if ips:
+                        return ips[0]
+            except:
+                pass
+            # Запасной вариант
+            return socket.gethostbyname(socket.gethostname())
+    except Exception as e:
+        return "127.0.0.1"
 
 
 class RPGGameServer:
@@ -38,20 +88,21 @@ class RPGGameServer:
         self.temperature = self.config.settings["ollama"]["temperature"]
         self.narrator_prompt = self.config.settings["ollama"]["narrator_prompt"]
 
-    # =========================================================
     async def start_server(self, host, port, room_name, max_players, turn_mode, world_description):
         self.room_name = room_name
         self.max_players = max_players
         self.turn_mode = turn_mode
         self.world_description = world_description
 
+        # Мягкая проверка Ollama: предупреждаем, но не останавливаем
         if not await self.check_ollama():
-            self.ui.print_error("Ollama недоступна. Игра может не работать.")
+            self.ui.print_warning("Ollama недоступна или модель не найдена. Игра может не работать.")
         else:
             self.ui.print_success(f"Модель {self.ollama_model} готова")
 
-        hostname = socket.gethostname()
-        local_ip = socket.gethostbyname(hostname)
+        local_ip = get_local_ip()
+        if local_ip == "127.0.0.1":
+            self.ui.print_warning("Не удалось определить сетевой IP, используется 127.0.0.1 (только локально)")
 
         self.ui.clear_screen()
         self.ui.print_header("СЕРВЕР ЗАПУЩЕН")
@@ -73,8 +124,8 @@ class RPGGameServer:
         finally:
             console_task.cancel()
 
-    # =========================================================
     async def check_ollama(self):
+        """Проверка, что Ollama запущена и модель доступна. Возвращает True/False."""
         url = "http://localhost:11434/api/tags"
         try:
             async with aiohttp.ClientSession() as session:
@@ -85,19 +136,12 @@ class RPGGameServer:
                         if self.ollama_model in models:
                             return True
                         else:
-                            self.ui.print_warning(f"Модель {self.ollama_model} не найдена. Доступные: {', '.join(models[:5])}...")
-                            return False
+                            return False  # модель не найдена, но сервер жив
                     else:
-                        self.ui.print_error(f"Ollama вернула статус {response.status}")
                         return False
-        except aiohttp.ClientConnectorError:
-            self.ui.print_error("Ollama не запущена (http://localhost:11434)")
-            return False
-        except Exception as e:
-            self.ui.print_error(f"Ошибка проверки Ollama: {e}")
+        except Exception:
             return False
 
-    # =========================================================
     async def handle_client(self, websocket):
         if len(self.clients) >= self.max_players:
             await websocket.send(json.dumps({"type": "error", "message": "Комната заполнена"}))
@@ -230,7 +274,6 @@ class RPGGameServer:
 """
         return context
 
-    # =========================================================
     async def get_ai_response(self, prompt):
         url = "http://localhost:11434/api/generate"
         payload = {
@@ -256,7 +299,6 @@ class RPGGameServer:
             self.ui.print_error(f"Ошибка API: {e}")
             return f"Ошибка связи с Ollama: {str(e)}"
 
-    # =========================================================
     async def handle_admin_command(self, websocket, command):
         if websocket != list(self.clients.keys())[0]:
             await websocket.send(json.dumps({
@@ -304,7 +346,6 @@ class RPGGameServer:
         self.ui.print_info("  /mode <free/turn> - сменить режим")
         self.ui.print_info("  /help - эта справка")
 
-    # =========================================================
     async def console_input_task(self):
         loop = asyncio.get_event_loop()
         while True:
@@ -322,7 +363,6 @@ class RPGGameServer:
             except Exception as e:
                 self.ui.print_error(f"Ошибка ввода: {e}")
 
-    # =========================================================
     async def start_game(self):
         if len(self.clients) < 2:
             self.ui.print_error("Нужно минимум 2 игрока")
@@ -385,10 +425,8 @@ class RPGGameServer:
 
             self.ui.print_warning(f"Игрок {player_name} отключился")
 
-    # =========================================================
     async def broadcast(self, message):
         msg_type = message.get("type", "")
-        # Вывод в консоль сервера с учётом цвета игрока
         if msg_type == "player_joined":
             self.ui.print_colored(f"✓ Игрок {message['player_name']} подключился "
                                   f"({message['total_players']}/{message['max_players']})", Fore.GREEN)
@@ -419,7 +457,6 @@ class RPGGameServer:
         elif msg_type == "error":
             self.ui.print_colored(f"Ошибка: {message.get('message', '')}", Fore.RED)
 
-        # Рассылка клиентам
         if self.clients:
             message_json = json.dumps(message)
             for ws in list(self.clients.keys()):
