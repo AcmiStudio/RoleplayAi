@@ -1,5 +1,5 @@
 """
-main.py - Главное меню с редактором персонажей/миров и выбором цвета
+main.py - Главное меню с редактором персонажей/миров, выбором цвета, характеристиками и паролем разработчика
 """
 import sys
 import os
@@ -13,15 +13,9 @@ class MainMenu:
     def __init__(self):
         self.config = Config()
         self.ui = ConsoleUI()
-        # Словарь доступных цветов для игрока
         self.colors = {
-            "WHITE": Fore.WHITE,
-            "CYAN": Fore.CYAN,
-            "YELLOW": Fore.YELLOW,
-            "GREEN": Fore.GREEN,
-            "MAGENTA": Fore.MAGENTA,
-            "RED": Fore.RED,
-            "BLUE": Fore.BLUE
+            "WHITE": Fore.WHITE, "CYAN": Fore.CYAN, "YELLOW": Fore.YELLOW,
+            "GREEN": Fore.GREEN, "MAGENTA": Fore.MAGENTA, "RED": Fore.RED, "BLUE": Fore.BLUE
         }
 
     def run(self):
@@ -62,16 +56,13 @@ class MainMenu:
                 traceback.print_exc()
                 input("Нажмите Enter...")
 
-    # =========================================================
-    # СОЗДАНИЕ КОМНАТЫ
-    # =========================================================
+    # ---- СОЗДАНИЕ КОМНАТЫ ----
     def create_room(self):
         try:
             from server import RPGGameServer
             server = RPGGameServer()
             self.ui.clear_screen()
             self.ui.print_header("СОЗДАНИЕ КОМНАТЫ")
-
             room_name = self.ui.get_input("Название комнаты")
             while True:
                 try:
@@ -81,13 +72,9 @@ class MainMenu:
                     self.ui.print_error("Число от 2 до 4")
                 except ValueError:
                     self.ui.print_error("Введите число")
-
             mode_choice = self.ui.get_input("Режим (1 - свободный, 2 - поочерёдный)")
             turn_mode = "free" if mode_choice == "1" else "turn"
-
-            # Выбор мира
             world_description = self.select_or_create_world()
-
             asyncio.run(server.start_server(
                 host="0.0.0.0", port=8765,
                 room_name=room_name, max_players=max_players,
@@ -98,34 +85,34 @@ class MainMenu:
             traceback.print_exc()
         input("Нажмите Enter для возврата...")
 
-    # =========================================================
-    # ПОДКЛЮЧЕНИЕ К КОМНАТЕ
-    # =========================================================
+    # ---- ПОДКЛЮЧЕНИЕ ----
     def join_room(self):
         try:
             from client import RPGGameClient
             client = RPGGameClient()
-
-            if not self.config.settings.get("player_character"):
+            character_text = self.config.load_player_character_text()
+            if not character_text:
                 self.ui.print_warning("Персонаж не выбран!")
                 self.select_character()
-
+                character_text = self.config.load_player_character_text()
+            if not character_text:
+                self.ui.print_error("Не удалось загрузить персонажа.")
+                return
             player_name = self.ui.get_input("Имя вашего персонажа")
             server_address = self.ui.get_input("Адрес сервера (ws://localhost:8765)")
-
+            dev_password = self.config.get_dev_password()
             asyncio.run(client.join_room(
                 player_name=player_name,
                 server_address=server_address,
-                character_desc=self.config.settings["player_character"],
-                player_color=self.config.settings.get("player_color", "WHITE")
+                character_desc=character_text,
+                player_color=self.config.settings.get("player_color", "WHITE"),
+                dev_password=dev_password
             ))
         except Exception as e:
             self.ui.print_error(f"Ошибка подключения: {e}")
         input("Нажмите Enter для возврата...")
 
-    # =========================================================
-    # НАСТРОЙКИ
-    # =========================================================
+    # ---- НАСТРОЙКИ ----
     def settings_menu(self):
         while True:
             self.ui.clear_screen()
@@ -134,9 +121,12 @@ class MainMenu:
                 "Настройки модели Ollama",
                 "Выбрать персонажа",
                 "Выбрать цвет игрока",
+                "Сетевые настройки (IP вручную)",
+                "Управление характеристиками (шаблон)",
+                "Пароль разработчика",
                 "Назад"
             ])
-            choice = self.ui.get_input("Выберите")
+            choice = self.ui.get_input(">")
             if choice == "1":
                 self.ollama_settings()
             elif choice == "2":
@@ -144,6 +134,12 @@ class MainMenu:
             elif choice == "3":
                 self.select_player_color()
             elif choice == "4":
+                self.network_settings()
+            elif choice == "5":
+                self.manage_stats_template()
+            elif choice == "6":
+                self.set_dev_password()
+            elif choice == "7":
                 break
             else:
                 self.ui.print_error("Неверный выбор")
@@ -196,15 +192,24 @@ class MainMenu:
                 break
             input("Нажмите Enter...")
 
-    # =========================================================
-    # ВЫБОР ЦВЕТА ИГРОКА
-    # =========================================================
+    def network_settings(self):
+        self.ui.clear_screen()
+        self.ui.print_header("СЕТЕВЫЕ НАСТРОЙКИ")
+        current = self.config.get_manual_ip()
+        self.ui.print_info(f"Текущий ручной IP: {current if current else 'автоопределение'}")
+        new_ip = self.ui.get_input("Введите IP (оставьте пустым для автоопределения):")
+        self.config.set_manual_ip(new_ip)
+        if new_ip.strip():
+            self.ui.print_success(f"Установлен IP: {new_ip}")
+        else:
+            self.ui.print_success("Включено автоопределение IP")
+        input("Нажмите Enter...")
+
     def select_player_color(self):
         self.ui.clear_screen()
         self.ui.print_header("ВЫБОР ЦВЕТА ИГРОКА")
         color_names = list(self.colors.keys())
         for i, name in enumerate(color_names, 1):
-            # Показываем цветом
             self.ui.print_colored(f"{i}. {name}", self.colors[name])
         try:
             idx = int(self.ui.get_input("Номер цвета")) - 1
@@ -219,9 +224,89 @@ class MainMenu:
             self.ui.print_error("Введите число")
         input("Нажмите Enter...")
 
-    # =========================================================
-    # УПРАВЛЕНИЕ ПЕРСОНАЖАМИ
-    # =========================================================
+    # ---- ШАБЛОН ХАРАКТЕРИСТИК ----
+    def manage_stats_template(self):
+        while True:
+            self.ui.clear_screen()
+            self.ui.print_header("ШАБЛОН ХАРАКТЕРИСТИК")
+            template = self.config.load_stats_template()
+            if template:
+                self.ui.print_info("Текущий шаблон:")
+                for key, val in template.items():
+                    self.ui.print_colored(f"  {key}: {val}", Fore.CYAN)
+            else:
+                self.ui.print_info("Шаблон пуст")
+            self.ui.print_menu([
+                "Добавить характеристику",
+                "Изменить значение по умолчанию",
+                "Удалить характеристику",
+                "Назад"
+            ])
+            choice = self.ui.get_input(">")
+            if choice == "1":
+                name = self.ui.get_input("Название новой характеристики (англ.):")
+                if name:
+                    try:
+                        default_val = float(self.ui.get_input("Значение по умолчанию:"))
+                        template[name] = default_val
+                        self.config.save_stats_template(template)
+                        self.ui.print_success(f"'{name}' добавлена")
+                    except ValueError:
+                        self.ui.print_error("Нужно число")
+            elif choice == "2":
+                if not template:
+                    self.ui.print_error("Нет характеристик")
+                    continue
+                name = self.ui.get_input("Название характеристики для изменения:")
+                if name in template:
+                    try:
+                        new_val = float(self.ui.get_input(f"Новое значение для {name}:"))
+                        template[name] = new_val
+                        self.config.save_stats_template(template)
+                        self.ui.print_success("Значение обновлено")
+                    except ValueError:
+                        self.ui.print_error("Число!")
+                else:
+                    self.ui.print_error("Не найдено")
+            elif choice == "3":
+                if not template:
+                    self.ui.print_error("Пусто")
+                    continue
+                name = self.ui.get_input("Название для удаления:")
+                if name in template:
+                    del template[name]
+                    self.config.save_stats_template(template)
+                    self.ui.print_success(f"'{name}' удалена")
+                else:
+                    self.ui.print_error("Не найдено")
+            elif choice == "4":
+                break
+            input("Нажмите Enter...")
+
+    # ---- ПАРОЛЬ РАЗРАБОТЧИКА ----
+    def set_dev_password(self):
+        self.ui.clear_screen()
+        self.ui.print_header("ПАРОЛЬ РАЗРАБОТЧИКА")
+        self.ui.print_info("Этот пароль даст вам читерские права на сервере.")
+        current = self.config.get_dev_password()
+        if current:
+            self.ui.print_info("Пароль уже задан. Введите новый или оставьте пустым для удаления.")
+        else:
+            self.ui.print_info("Пароль не задан.")
+        new_pwd = self.ui.get_password("Введите пароль (скрытый ввод):")
+        if new_pwd.strip() == "":
+            if current:
+                if self.ui.get_input("Удалить пароль? (y/n)").lower() == 'y':
+                    self.config.set_dev_password("")
+                    self.ui.print_success("Пароль удалён.")
+            else:
+                self.ui.print_info("Пароль не изменён.")
+        else:
+            self.config.set_dev_password(new_pwd)
+            self.ui.print_success("Пароль сохранён.")
+        input("Нажмите Enter...")
+
+    # ---- УПРАВЛЕНИЕ ПЕРСОНАЖАМИ (с характеристиками) ----
     def character_manager(self):
         while True:
             self.ui.clear_screen()
@@ -238,7 +323,7 @@ class MainMenu:
                 "Удалить персонажа",
                 "Выбрать персонажа для игры",
                 "Назад"
-            ], title="Действия")
+            ])
             choice = self.ui.get_input(">")
             if choice == "1":
                 self.create_character()
@@ -262,20 +347,44 @@ class MainMenu:
         if not name:
             return
         if name in self.config.list_characters():
-            overwrite = self.ui.get_input("Персонаж уже существует. Перезаписать? (y/n)")
-            if overwrite.lower() != 'y':
+            if self.ui.get_input("Персонаж уже существует. Перезаписать? (y/n)").lower() != 'y':
                 return
         content = self.ui.get_multiline_input("Введите описание персонажа (пустая строка — конец):")
-        if content:
-            self.config.save_character(name, content)
-            self.ui.print_success(f"Персонаж '{name}' сохранён!")
+        if not content:
+            return
+        self.config.save_character(name, content)
+        if self.ui.get_input("Добавить характеристики? (y/n)").lower() == 'y':
+            self.configure_character_stats(name)
+        else:
+            self.config.delete_character_stats(name)
+        self.ui.print_success(f"Персонаж '{name}' сохранён!")
+
+    def configure_character_stats(self, name):
+        template = self.config.load_stats_template()
+        if not template:
+            self.ui.print_info("Шаблон характеристик пуст. Создайте его в настройках.")
+            return
+        stats = {}
+        self.ui.print_info("Настройка характеристик (оставьте пустым для значения по умолчанию):")
+        for key, default_val in template.items():
+            val_input = self.ui.get_input(f"{key} (по умолчанию {default_val}):")
+            if val_input.strip() == "":
+                stats[key] = default_val
+            else:
+                try:
+                    stats[key] = float(val_input)
+                except ValueError:
+                    self.ui.print_error("Не число, будет использовано значение по умолчанию")
+                    stats[key] = default_val
+        self.config.save_character_stats(name, stats)
+        self.ui.print_success("Характеристики сохранены.")
 
     def edit_character(self):
         self.ui.clear_screen()
         self.ui.print_header("РЕДАКТИРОВАНИЕ ПЕРСОНАЖА")
         chars = self.config.list_characters()
         if not chars:
-            self.ui.print_info("Нет персонажей для редактирования")
+            self.ui.print_info("Нет персонажей")
             return
         for i, name in enumerate(chars, 1):
             self.ui.print_colored(f"{i}. {name}", Fore.CYAN)
@@ -286,17 +395,22 @@ class MainMenu:
                 content = self.config.load_character(name)
                 self.ui.print_colored("Текущее описание:", Fore.BLUE)
                 print(content)
-                self.ui.print_warning("Введите новый текст (пустая строка — конец, оставить пустым для отмены):")
-                new_content = self.ui.get_multiline_input("")
-                if new_content.strip() != "":
+                new_content = self.ui.get_multiline_input("Новый текст (пустая строка — отмена):")
+                if new_content.strip():
                     self.config.save_character(name, new_content)
-                    self.ui.print_success(f"Персонаж '{name}' обновлён!")
-                else:
-                    self.ui.print_info("Отменено")
+                stats = self.config.get_character_stats(name)
+                if stats:
+                    self.ui.print_info("Текущие характеристики:")
+                    for k, v in stats.items():
+                        self.ui.print_colored(f"  {k}: {v}", Fore.CYAN)
+                if self.ui.get_input("Изменить характеристики? (y/n)").lower() == 'y':
+                    self.configure_character_stats(name)
+                self.ui.print_success(f"Персонаж '{name}' обновлён")
             else:
                 self.ui.print_error("Неверный номер")
         except ValueError:
             self.ui.print_error("Введите число")
+        input("Нажмите Enter...")
 
     def delete_character(self):
         self.ui.clear_screen()
@@ -311,17 +425,17 @@ class MainMenu:
             idx = int(self.ui.get_input("Номер для удаления")) - 1
             if 0 <= idx < len(chars):
                 name = chars[idx]
-                confirm = self.ui.get_input(f"Удалить '{name}'? (y/n)")
-                if confirm.lower() == 'y':
+                if self.ui.get_input(f"Удалить '{name}'? (y/n)").lower() == 'y':
                     self.config.delete_character(name)
+                    self.config.delete_character_stats(name)
                     self.ui.print_success(f"'{name}' удалён")
             else:
                 self.ui.print_error("Неверный номер")
         except ValueError:
             self.ui.print_error("Введите число")
+        input("Нажмите Enter...")
 
     def select_character(self):
-        """Выбор персонажа для игры"""
         self.ui.clear_screen()
         self.ui.print_header("ВЫБОР ПЕРСОНАЖА")
         chars = self.config.list_characters()
@@ -332,33 +446,32 @@ class MainMenu:
             try:
                 idx = int(self.ui.get_input("Номер персонажа (0 - ручной ввод)"))
                 if idx == 0:
-                    manual = self.ui.get_multiline_input("Введите описание персонажа (пустая строка — конец):")
+                    manual = self.ui.get_multiline_input("Введите описание:")
                     if manual:
-                        self.config.settings["player_character"] = manual
-                        self.config.save_settings()
-                        self.ui.print_success("Персонаж установлен (без сохранения в файл)")
+                        temp_name = "_manual_character"
+                        self.config.save_character(temp_name, manual)
+                        self.config.set_player_character_file(temp_name)
+                        self.config.delete_character_stats(temp_name)
+                        self.ui.print_success("Персонаж установлен")
                 elif 1 <= idx <= len(chars):
                     name = chars[idx-1]
-                    content = self.config.load_character(name)
-                    self.config.settings["player_character"] = content
-                    self.config.save_settings()
+                    self.config.set_player_character_file(name)
                     self.ui.print_success(f"Выбран персонаж '{name}'")
                 else:
                     self.ui.print_error("Неверный номер")
             except ValueError:
                 self.ui.print_error("Введите число")
         else:
-            self.ui.print_info("Сохранённых персонажей нет")
-            manual = self.ui.get_multiline_input("Введите описание персонажа (пустая строка — конец):")
+            self.ui.print_info("Нет сохранённых персонажей")
+            manual = self.ui.get_multiline_input("Введите описание:")
             if manual:
-                self.config.settings["player_character"] = manual
-                self.config.save_settings()
+                temp_name = "_manual_character"
+                self.config.save_character(temp_name, manual)
+                self.config.set_player_character_file(temp_name)
                 self.ui.print_success("Персонаж установлен")
         input("Нажмите Enter...")
 
-    # =========================================================
-    # УПРАВЛЕНИЕ МИРАМИ
-    # =========================================================
+    # ---- УПРАВЛЕНИЕ МИРАМИ (без изменений) ----
     def world_manager(self):
         while True:
             self.ui.clear_screen()
@@ -396,8 +509,7 @@ class MainMenu:
         if not name:
             return
         if name in self.config.list_worlds():
-            ow = self.ui.get_input("Мир уже существует. Перезаписать? (y/n)")
-            if ow.lower() != 'y':
+            if self.ui.get_input("Мир уже существует. Перезаписать? (y/n)").lower() != 'y':
                 return
         content = self.ui.get_multiline_input("Введите описание мира (пустая строка — конец):")
         if content:
@@ -431,6 +543,7 @@ class MainMenu:
                 self.ui.print_error("Неверный номер")
         except ValueError:
             self.ui.print_error("Введите число")
+        input("Нажмите Enter...")
 
     def delete_world(self):
         self.ui.clear_screen()
@@ -452,9 +565,9 @@ class MainMenu:
                 self.ui.print_error("Неверный номер")
         except ValueError:
             self.ui.print_error("Введите число")
+        input("Нажмите Enter...")
 
     def select_or_create_world(self):
-        """Используется при создании комнаты: предлагает выбрать мир, создать новый или ввести вручную"""
         self.ui.clear_screen()
         self.ui.print_header("ВЫБОР МИРА")
         worlds = self.config.list_worlds()
@@ -467,7 +580,6 @@ class MainMenu:
                 choice = int(self.ui.get_input("Номер мира"))
                 if choice == -1:
                     self.create_world()
-                    # После создания возвращаемся к выбору (можно рекурсивно, но для простоты просто попросим выбрать снова)
                     return self.select_or_create_world()
                 elif choice == 0:
                     return self.ui.get_multiline_input("Введите описание мира (пустая строка — конец):")
@@ -489,6 +601,7 @@ class MainMenu:
             else:
                 return self.ui.get_multiline_input("Введите описание мира (пустая строка — конец):")
 
+
 if __name__ == "__main__":
     try:
         menu = MainMenu()
@@ -497,6 +610,8 @@ if __name__ == "__main__":
         print("\nВыход из программы...")
         sys.exit(0)
     except Exception as e:
-        print(f"Критическая ошибка: {e}")
+        print(f"\nКРИТИЧЕСКАЯ ОШИБКА: {e}")
         traceback.print_exc()
+        with open("error_log.txt", "w", encoding="utf-8") as f:
+            traceback.print_exc(file=f)
         input("Нажмите Enter для выхода...")

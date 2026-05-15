@@ -1,5 +1,5 @@
 """
-client.py – Клиент RPG (исправленное подключение)
+client.py – Клиент RPG (поддержка dev-режима, характеристик, флагов)
 """
 import asyncio
 import json
@@ -24,16 +24,20 @@ class RPGGameClient:
         self.character_desc = ""
         self.player_color = "WHITE"
         self.is_admin = False
+        self.is_dev = False
         self.room_name = ""
         self.my_turn = False
         self.running = True
+        self.stats = {}
+        self.dev_password = ""
 
-    async def join_room(self, player_name, server_address, character_desc, player_color="WHITE"):
+    async def join_room(self, player_name, server_address, character_desc, player_color="WHITE", dev_password=""):
         self.player_name = player_name
         self.character_desc = character_desc
         self.player_color = player_color
-        self.config.settings["player_color"] = player_color
-        self.config.settings["player_character"] = character_desc
+        self.dev_password = dev_password
+        char_file = self.config.get_player_character_file()
+        self.stats = self.config.get_character_stats(char_file) if char_file else {}
         self.config.save_settings()
         self.ui.print_info("Подключение к серверу...")
         await self.connect_to_server(server_address)
@@ -43,13 +47,10 @@ class RPGGameClient:
             self.websocket = await websockets.connect(uri)
         except OSError as e:
             self.ui.print_error(f"Не удалось подключиться к {uri}")
-            if e.errno == 10061 or "ConnectionRefused" in str(e):
-                self.ui.print_error("Сервер не доступен. Проверьте:")
-                self.ui.print_error("  - IP-адрес сервера (введите его точно как показано в консоли сервера)")
-                self.ui.print_error("  - Брандмауэр Windows: разрешите входящие соединения на порт 8765")
-                self.ui.print_error("  - Что сервер запущен и показывает IP, а не localhost")
+            if "ConnectionRefused" in str(e) or e.errno == 10061:
+                self.ui.print_error("Сервер не доступен. Проверьте IP, порт и брандмауэр.")
             else:
-                self.ui.print_error(f"Системная ошибка: {e}")
+                self.ui.print_error(f"Ошибка: {e}")
             return
         except Exception as e:
             self.ui.print_error(f"Неизвестная ошибка подключения: {e}")
@@ -59,14 +60,14 @@ class RPGGameClient:
             player_info = {
                 "name": self.player_name,
                 "character": self.character_desc,
-                "color": self.player_color
+                "color": self.player_color,
+                "stats": self.stats,
+                "dev_password": self.dev_password
             }
             await self.websocket.send(json.dumps(player_info))
-
             receive_task = asyncio.create_task(self.receive_messages())
             send_task = asyncio.create_task(self.send_messages())
             await asyncio.gather(receive_task, send_task)
-
         except websockets.exceptions.ConnectionClosed:
             self.ui.print_warning("Соединение закрыто сервером")
         except Exception as e:
@@ -82,13 +83,16 @@ class RPGGameClient:
                 data = json.loads(message)
                 await self.process_server_message(data)
         except websockets.exceptions.ConnectionClosed:
-            self.ui.print_warning("Соединение с сервером разорвано")
+            self.ui.print_warning("Соединение разорвано")
             self.running = False
 
     async def process_server_message(self, data):
         msg_type = data.get("type", "")
         if msg_type == "room_info":
             self.room_name = data["room_name"]
+            self.is_dev = data.get("you_are_dev", False)
+            if self.is_dev:
+                self.ui.print_success("Вы вошли как разработчик!")
             self.ui.print_header(f"КОМНАТА: {self.room_name}")
             self.ui.print_info(f"Режим: {data['mode']}")
             self.ui.print_info("Игроки в комнате:")
@@ -118,6 +122,29 @@ class RPGGameClient:
         elif msg_type == "lobby_message":
             color = getattr(Fore, data.get("player_color", "WHITE"), Fore.WHITE)
             self.ui.print_colored(f"[Лобби] {data['from']}: {data['content']}", color)
+        elif msg_type == "private_message":
+            color = getattr(Fore, data.get("player_color", "MAGENTA"), Fore.MAGENTA)
+            self.ui.print_colored(f"[ЛС] {data['from']}: {data['text']}", color)
+        elif msg_type == "players_list":
+            self.ui.print_info("Список игроков:")
+            for p in data["players"]:
+                line = f"  {p['name']}"
+                if p.get("stats"):
+                    line += f" | Статы: {p['stats']}"
+                if p.get("flags"):
+                    line += f" | Флаги: {p['flags']}"
+                self.ui.print_colored(line, Fore.CYAN)
+        elif msg_type == "stats_update":
+            if data["player_name"] == self.player_name:
+                self.stats = data["stats"]
+            self.ui.print_colored(f"[Статы] {data['player_name']}: {data['stats']}", Fore.CYAN)
+        elif msg_type == "stats_display":
+            self.ui.print_colored(f"Статы игрока {data['player_name']}: {data['stats']}", Fore.CYAN)
+        elif msg_type == "flags_update":
+            self.ui.print_colored(f"[Флаги] {data['player_name']}: {data.get('flags', [])}", Fore.MAGENTA)
+        elif msg_type == "event_announcement":
+            self.ui.print_colored(f"⚠ СОБЫТИЕ: {data['event_name']}", Fore.YELLOW)
+            self.ui.print_colored(f"{data['text']}", Fore.YELLOW)
         elif msg_type == "player_jailed":
             self.ui.print_warning(f"Игрок {data['player']} заблокирован")
         elif msg_type == "player_unjailed":
@@ -158,25 +185,28 @@ class RPGGameClient:
 
     async def handle_client_command(self, command):
         parts = command.split()
+        if not parts:
+            return
         cmd = parts[0].lower()
-        if cmd == "/help":
-            self.ui.print_info("Доступные команды:")
-            self.ui.print_info("  /help - справка")
-            self.ui.print_info("  /quit - выйти из игры")
-            if self.is_admin:
-                self.ui.print_info("  Администраторские команды:")
-                self.ui.print_info("  /kick <имя>, /jail <имя>, /unjail <имя>")
-                self.ui.print_info("  /mode <free/turn>, /start, /stop")
-        elif cmd == "/quit":
-            self.running = False
-            await self.websocket.close()
-        elif cmd in ["/kick", "/jail", "/unjail", "/mode", "/start", "/stop"]:
-            if self.is_admin:
+        if cmd in ["/kick", "/jail", "/unjail", "/mode", "/start", "/stop", "/event", "/setstat", "/modstat", "/setflag"]:
+            if self.is_admin or self.is_dev:
                 await self.websocket.send(json.dumps({
                     "type": "admin_command",
                     "command": command
                 }))
             else:
-                self.ui.print_error("Только администратор может использовать эту команду")
+                self.ui.print_error("Только администратор или разработчик может использовать эту команду")
+        elif cmd in ["/msg", "/players", "/stats"]:
+            await self.websocket.send(json.dumps({
+                "type": "player_command",
+                "command": command
+            }))
+        elif cmd == "/quit":
+            self.running = False
+            await self.websocket.close()
+        elif cmd == "/help":
+            self.ui.print_info("/help, /quit, /msg <игрок> <текст>, /players, /stats")
+            if self.is_dev or self.is_admin:
+                self.ui.print_info("Команды разработчика: /setstat, /modstat, /setflag, /event, /kick, /jail, /mode...")
         else:
             self.ui.print_error("Неизвестная команда. /help для списка")

@@ -1,9 +1,10 @@
 """
-utils.py - Вспомогательные функции с поддержкой многострочного ввода
+utils.py - Вспомогательные функции (добавлен getpass для пароля)
 """
 import os
 import sys
 import platform
+from getpass import getpass
 from colorama import init, Fore, Style
 
 init(autoreset=True)
@@ -39,8 +40,13 @@ class ConsoleUI:
         return input("> ").strip()
 
     @staticmethod
+    def get_password(prompt="Введите пароль: "):
+        """Скрытый ввод пароля"""
+        ConsoleUI.print_colored(prompt, Fore.GREEN)
+        return getpass("")
+
+    @staticmethod
     def get_multiline_input(prompt="Введите текст (пустая строка для завершения):"):
-        """Многострочный ввод текста. Завершается пустой строкой."""
         ConsoleUI.print_colored(prompt, Fore.GREEN)
         lines = []
         while True:
