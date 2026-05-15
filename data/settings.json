@@ -2,12 +2,14 @@
   "ollama": {
     "model": "gemma4:31b-cloud",
     "temperature": 0.7,
-    "narrator_prompt": "You are a creative RPG narrator..."
+    "narrator_prompt": "You are a creative RPG narrator. If a character takes damage, heals, or earns money, insert [[setstat:CharacterName:stat:value]] in your response, then remove it from the visible text."
   },
-  "player_character": "",
+  "player_character_file": "",
+  "player_color": "WHITE",
+  "dev_password": "DEV1234567",
   "network": {
     "host": "localhost",
-    "port": 8765
-  },
-  "player_color": "WHITE"
+    "port": 8765,
+    "manual_ip": ""
+  }
 }
