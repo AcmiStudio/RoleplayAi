@@ -1,8 +1,9 @@
 """
-client.py – Клиент RPG (поддержка dev-режима, характеристик, флагов)
+client.py – Клиент RPG с поддержкой друзей, обнаружением серверов и публичными комнатами
 """
 import asyncio
 import json
+import socket
 from config import Config
 from utils import ConsoleUI
 from colorama import Fore
@@ -76,6 +77,80 @@ class RPGGameClient:
             if self.websocket:
                 await self.websocket.close()
 
+    # ------------------------------------------------------------
+    # ОБНАРУЖЕНИЕ СЕРВЕРОВ
+    # ------------------------------------------------------------
+    async def discover_servers(self):
+        loop = asyncio.get_event_loop()
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.setblocking(False)
+        servers = []
+        try:
+            sock.sendto(b"DISCOVER", ('255.255.255.255', 8766))
+            self.ui.print_info("Поиск серверов... (ожидание 3 сек)")
+            for _ in range(6):
+                try:
+                    data, addr = await asyncio.wait_for(
+                        loop.sock_recvfrom(sock, 1024),
+                        timeout=0.5
+                    )
+                    info = json.loads(data.decode())
+                    info['address'] = f"ws://{info['ip']}:{info['port']}"
+                    servers.append(info)
+                except asyncio.TimeoutError:
+                    continue
+                except:
+                    continue
+        except Exception as e:
+            self.ui.print_error(f"Ошибка сканирования: {e}")
+        finally:
+            sock.close()
+        return servers
+
+    async def get_public_rooms(self, coordinator_address):
+        """Запрашивает список публичных комнат у координатора"""
+        try:
+            async with websockets.connect(coordinator_address) as ws:
+                await ws.send(json.dumps({"action": "list"}))
+                response = await asyncio.wait_for(ws.recv(), timeout=5)
+                data = json.loads(response)
+                if data.get("type") == "public_rooms_list":
+                    return data["rooms"]
+        except Exception as e:
+            self.ui.print_error(f"Не удалось получить список публичных комнат: {e}")
+        return []
+
+    async def check_friend_online(self, ip):
+        loop = asyncio.get_event_loop()
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock.setblocking(False)
+        try:
+            sock.sendto(b"DISCOVER", (ip, 8766))
+            data, _ = await asyncio.wait_for(loop.sock_recvfrom(sock, 1024), timeout=1.0)
+            info = json.loads(data.decode())
+            return info
+        except:
+            return None
+        finally:
+            sock.close()
+
+    async def get_server_players(self, server_address):
+        try:
+            async with websockets.connect(server_address) as ws:
+                await ws.send(json.dumps({"name": "?scanner", "character": "", "color": "WHITE", "stats": {}, "dev_password": ""}))
+                message = await asyncio.wait_for(ws.recv(), timeout=5)
+                data = json.loads(message)
+                if data.get("type") == "room_info":
+                    return [p["name"] for p in data.get("players", [])]
+        except:
+            return []
+        return []
+
+    # ------------------------------------------------------------
+    # ОСНОВНЫЕ КОММУНИКАЦИИ
+    # ------------------------------------------------------------
     async def receive_messages(self):
         try:
             while self.running:
@@ -145,6 +220,14 @@ class RPGGameClient:
         elif msg_type == "event_announcement":
             self.ui.print_colored(f"⚠ СОБЫТИЕ: {data['event_name']}", Fore.YELLOW)
             self.ui.print_colored(f"{data['text']}", Fore.YELLOW)
+        elif msg_type == "friend_add_info":
+            self.config.add_friend(data["nickname"], data["ip"])
+            self.ui.print_success(f"'{data['nickname']}' добавлен в друзья!")
+        elif msg_type == "friend_delete":
+            if self.config.remove_friend(data["nickname"]):
+                self.ui.print_success(f"'{data['nickname']}' удалён из друзей.")
+            else:
+                self.ui.print_warning(f"'{data['nickname']}' не найден в списке друзей.")
         elif msg_type == "player_jailed":
             self.ui.print_warning(f"Игрок {data['player']} заблокирован")
         elif msg_type == "player_unjailed":
@@ -196,7 +279,7 @@ class RPGGameClient:
                 }))
             else:
                 self.ui.print_error("Только администратор или разработчик может использовать эту команду")
-        elif cmd in ["/msg", "/players", "/stats"]:
+        elif cmd in ["/msg", "/players", "/stats", "/friends"]:
             await self.websocket.send(json.dumps({
                 "type": "player_command",
                 "command": command
@@ -206,6 +289,7 @@ class RPGGameClient:
             await self.websocket.close()
         elif cmd == "/help":
             self.ui.print_info("/help, /quit, /msg <игрок> <текст>, /players, /stats")
+            self.ui.print_info("/friends add <ник>, /friends delete <ник>, /friends msg <ник> <текст>")
             if self.is_dev or self.is_admin:
                 self.ui.print_info("Команды разработчика: /setstat, /modstat, /setflag, /event, /kick, /jail, /mode...")
         else:

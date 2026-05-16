@@ -1,5 +1,5 @@
 """
-server.py – Полный сервер RPG (поддержка dev-режима, мета-команды ИИ)
+server.py – Сервер RPG с поддержкой друзей, координатора, характеристик и разработчика
 """
 import asyncio
 import json
@@ -82,6 +82,15 @@ def get_local_ip():
             pass
         return "127.0.0.1"
 
+def get_network_type(ip):
+    if ip.startswith("192.168."):
+        return "Wi-Fi"
+    if ip.startswith("10."):
+        return "Точка доступа / моб."
+    if ip.startswith("26.") or ip.startswith("25."):
+        return "Radmin VPN / Hamachi"
+    return "Неизвестно"
+
 class RPGGameServer:
     def __init__(self):
         self.config = Config()
@@ -94,10 +103,13 @@ class RPGGameServer:
         self.room_name = ""
         self.world_description = ""
         self.jailed_players = set()
+        self.dev_mode = False
         self.server_dev_password = self.config.get_dev_password()
         self.ollama_model = self.config.settings["ollama"]["model"]
         self.temperature = self.config.settings["ollama"]["temperature"]
         self.narrator_prompt = self.config.settings["ollama"]["narrator_prompt"]
+        self.discovery_port = 8766
+        self.coordinator_task = None
 
     async def start_server(self, host, port, room_name, max_players, turn_mode, world_description):
         self.room_name = room_name
@@ -119,17 +131,26 @@ class RPGGameServer:
             if local_ip == "127.0.0.1":
                 self.ui.print_warning("Не удалось определить сетевой IP, используется 127.0.0.1 (только локально)")
 
+        self.local_ip = local_ip
+        self.network_type = get_network_type(local_ip)
+
         self.ui.clear_screen()
         self.ui.print_header("СЕРВЕР ЗАПУЩЕН")
         self.ui.print_success(f"Комната: {self.room_name}")
         self.ui.print_success(f"Режим: {'Свободный' if self.turn_mode == 'free' else 'Поочерёдный'}")
         self.ui.print_success(f"Игроки: 0/{self.max_players}")
         self.ui.print_info(f"Адрес: ws://{local_ip}:{port}")
+        self.ui.print_info(f"Сеть: {self.network_type}")
         self.ui.print_info("Ожидание подключений...")
         self.ui.print_info("Вводите команды (/start, /help и т.д.)")
         self.ui.print_warning("Ctrl+C для остановки")
 
         console_task = asyncio.create_task(self.console_input_task())
+        discovery_task = asyncio.create_task(self.udp_discovery_task())
+
+        if self.config.get_use_public():
+            self.coordinator_task = asyncio.create_task(self.coordinator_register())
+
         try:
             async with websockets.serve(self.handle_client, host, port):
                 await asyncio.Future()
@@ -137,6 +158,83 @@ class RPGGameServer:
             pass
         finally:
             console_task.cancel()
+            discovery_task.cancel()
+            if self.coordinator_task:
+                await self.coordinator_unregister()
+                self.coordinator_task.cancel()
+
+    async def coordinator_register(self):
+        addr = self.config.get_coordinator_address()
+        self.ui.print_info(f"Регистрация на координаторе {addr}...")
+        try:
+            async with websockets.connect(addr) as ws:
+                await ws.send(json.dumps({
+                    "action": "register",
+                    "room_name": self.room_name,
+                    "ip": self.local_ip,
+                    "port": 8765,
+                    "network_type": self.network_type,
+                    "players": len(self.clients),
+                    "max_players": self.max_players,
+                    "game_started": self.game_started
+                }))
+                resp = await ws.recv()
+                data = json.loads(resp)
+                if data.get("status") == "ok":
+                    self.ui.print_success(f"Комната зарегистрирована как публичная (ID: {data.get('room_id')})")
+                while True:
+                    await asyncio.sleep(10)
+                    await ws.send(json.dumps({
+                        "action": "update",
+                        "ip": self.local_ip,
+                        "port": 8765,
+                        "players": len(self.clients),
+                        "game_started": self.game_started
+                    }))
+                    await ws.recv()
+        except Exception as e:
+            self.ui.print_warning(f"Не удалось подключиться к координатору: {e}")
+
+    async def coordinator_unregister(self):
+        try:
+            async with websockets.connect(self.config.get_coordinator_address()) as ws:
+                await ws.send(json.dumps({
+                    "action": "unregister",
+                    "ip": self.local_ip,
+                    "port": 8765
+                }))
+        except:
+            pass
+
+    async def udp_discovery_task(self):
+        loop = asyncio.get_event_loop()
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(('', self.discovery_port))
+        except OSError:
+            self.ui.print_warning("Порт обнаружения 8766 занят")
+            return
+        sock.setblocking(False)
+        while True:
+            try:
+                data, addr = await loop.sock_recvfrom(sock, 1024)
+                if data.strip() == b"DISCOVER":
+                    response = json.dumps({
+                        "room_name": self.room_name,
+                        "ip": self.local_ip,
+                        "port": 8765,
+                        "network_type": self.network_type,
+                        "players": len(self.clients),
+                        "max_players": self.max_players,
+                        "game_started": self.game_started
+                    })
+                    await loop.sock_sendto(sock, response.encode(), addr)
+            except (asyncio.CancelledError, KeyboardInterrupt):
+                break
+            except:
+                pass
+        sock.close()
 
     async def check_ollama(self):
         url = "http://localhost:11434/api/tags"
@@ -180,7 +278,8 @@ class RPGGameServer:
                 "total_players": len(self.clients),
                 "max_players": self.max_players
             })
-            self.ui.print_success(f"Игрок {self.clients[websocket]['name']} подключился")
+            self.ui.print_success(f"Игрок {self.clients[websocket]['name']} подключился "
+                                  f"({len(self.clients)}/{self.max_players})")
             await websocket.send(json.dumps({
                 "type": "room_info",
                 "room_name": self.room_name,
@@ -231,6 +330,7 @@ class RPGGameServer:
             return
         cmd = parts[0].lower()
         player_name = self.clients[websocket]["name"]
+
         if cmd == "/msg" and len(parts) >= 3:
             target = parts[1]
             text = " ".join(parts[2:])
@@ -254,6 +354,72 @@ class RPGGameServer:
                 }))
             else:
                 await websocket.send(json.dumps({"type": "error", "message": "Игрок не найден"}))
+
+        elif cmd == "/friends":
+            if len(parts) < 2:
+                await websocket.send(json.dumps({
+                    "type": "error",
+                    "message": "Используйте: /friends add|delete|msg <ник>"
+                }))
+                return
+            subcmd = parts[1].lower()
+            if subcmd == "add" and len(parts) >= 3:
+                target_name = parts[2]
+                target_ws = None
+                for ws, info in self.clients.items():
+                    if info["name"].lower() == target_name.lower():
+                        target_ws = ws
+                        break
+                if not target_ws:
+                    await websocket.send(json.dumps({
+                        "type": "error",
+                        "message": f"Игрок '{target_name}' не найден в комнате."
+                    }))
+                    return
+                remote_ip = target_ws.remote_address[0] if hasattr(target_ws, 'remote_address') else "127.0.0.1"
+                await websocket.send(json.dumps({
+                    "type": "friend_add_info",
+                    "nickname": target_name,
+                    "ip": remote_ip
+                }))
+            elif subcmd == "delete" and len(parts) >= 3:
+                target_name = parts[2]
+                await websocket.send(json.dumps({
+                    "type": "friend_delete",
+                    "nickname": target_name
+                }))
+            elif subcmd == "msg" and len(parts) >= 4:
+                target_name = parts[2]
+                text = " ".join(parts[3:])
+                target_ws = None
+                for ws, info in self.clients.items():
+                    if info["name"].lower() == target_name.lower():
+                        target_ws = ws
+                        break
+                if target_ws:
+                    await target_ws.send(json.dumps({
+                        "type": "private_message",
+                        "from": player_name,
+                        "text": text,
+                        "player_color": self.clients[websocket]["color"]
+                    }))
+                    await websocket.send(json.dumps({
+                        "type": "private_message",
+                        "from": "Система",
+                        "text": f"Вы -> {target_name}: {text}",
+                        "player_color": "MAGENTA"
+                    }))
+                else:
+                    await websocket.send(json.dumps({
+                        "type": "error",
+                        "message": f"Друг '{target_name}' не в сети."
+                    }))
+            else:
+                await websocket.send(json.dumps({
+                    "type": "error",
+                    "message": "Неверная команда. /friends add|delete|msg <ник>"
+                }))
+
         elif cmd == "/players":
             players_list = []
             for ws, info in self.clients.items():
@@ -346,7 +512,6 @@ class RPGGameServer:
                     if response.status == 200:
                         data = await response.json()
                         text = data.get("response", "")
-                        # Мета-команды [[setstat:...]]
                         pattern = r'\[\[(.*?)\]\]'
                         for cmd_str in re.findall(pattern, text):
                             parts = cmd_str.split(':')
@@ -382,7 +547,6 @@ class RPGGameServer:
             return f"Ошибка связи с Ollama: {str(e)}"
 
     async def handle_admin_command(self, websocket, command):
-        # Команды доступны, если это первый клиент (админ) или если у клиента есть флаг dev_mode
         if websocket != list(self.clients.keys())[0] and not self.clients[websocket].get("dev_mode", False):
             await websocket.send(json.dumps({
                 "type": "error",
@@ -527,14 +691,6 @@ class RPGGameServer:
                         self.ui.print_colored(f"{info['name']}: {stats}", Fore.CYAN)
                     else:
                         self.ui.print_colored(f"{info['name']}: нет характеристик", Fore.CYAN)
-        elif cmd == "/dev":
-            if len(parts) < 2:
-                self.ui.print_error("Укажите пароль")
-                return
-            if self.server_dev_password and parts[1] == self.server_dev_password:
-                self.ui.print_success("Режим разработчика активирован в консоли сервера")
-            else:
-                self.ui.print_error("Неверный пароль или пароль не задан")
         elif cmd == "/help":
             self.show_help()
         else:
@@ -546,7 +702,7 @@ class RPGGameServer:
         self.ui.print_info("  /modstat <игрок> <стат> <дельта>")
         self.ui.print_info("  /stats [игрок]")
         self.ui.print_info("  /setflag <игрок> <флаг>")
-        self.ui.print_info("  /dev <пароль> - активировать режим разработчика в консоли сервера")
+        self.ui.print_info("  /help - эта справка")
 
     async def console_input_task(self):
         loop = asyncio.get_event_loop()
@@ -570,14 +726,7 @@ class RPGGameServer:
             self.ui.print_error("Нужно минимум 2 игрока")
             return
         self.game_started = True
-        initial_prompt = f"""
-{self.narrator_prompt}
-
-МИР ИГРЫ:
-{self.world_description}
-
-Начни игру с захватывающего вступления.
-"""
+        initial_prompt = f"{self.narrator_prompt}\n\nМИР ИГРЫ:\n{self.world_description}\n\nНачни игру с захватывающего вступления."
         initial_scene = await self.get_ai_response(initial_prompt)
         await self.broadcast({
             "type": "game_started",

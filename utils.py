@@ -1,5 +1,5 @@
 """
-utils.py - Вспомогательные функции (добавлен getpass для пароля)
+utils.py – Вспомогательные функции (цвета, ввод, getpass, меню)
 """
 import os
 import sys
@@ -28,8 +28,9 @@ class ConsoleUI:
         print("="*50)
 
     @staticmethod
-    def print_menu(options, title="Меню"):
-        ConsoleUI.print_header(title)
+    def print_menu(options, title=None):
+        if title:
+            ConsoleUI.print_header(title)
         for i, option in enumerate(options, 1):
             ConsoleUI.print_colored(f"{i}. {option}", Fore.YELLOW)
         print()
@@ -41,7 +42,6 @@ class ConsoleUI:
 
     @staticmethod
     def get_password(prompt="Введите пароль: "):
-        """Скрытый ввод пароля"""
         ConsoleUI.print_colored(prompt, Fore.GREEN)
         return getpass("")
 

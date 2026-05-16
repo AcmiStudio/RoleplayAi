@@ -1,5 +1,5 @@
 """
-config.py - Управление настройками, персонажами, мирами и характеристиками
+config.py – Управление настройками, персонажами, мирами, характеристиками и друзьями
 """
 import json
 import os
@@ -12,6 +12,7 @@ class Config:
         self.characters_dir = self.data_dir / "characters"
         self.worlds_dir = self.data_dir / "worlds"
         self.stats_template_file = self.data_dir / "stats_template.json"
+        self.friends_file = self.data_dir / "friends.json"
         self.ensure_directories()
         self.settings = self.load_settings()
         self.migrate_character_text()
@@ -36,6 +37,11 @@ class Config:
             "player_character_file": "",
             "player_color": "WHITE",
             "dev_password": "",
+            "allow_friend_requests": True,
+            "coordinator": {
+                "address": "ws://localhost:8770",
+                "use_public": False
+            },
             "network": {
                 "host": "localhost",
                 "port": 8765,
@@ -85,7 +91,25 @@ class Config:
     def get_manual_ip(self):
         return self.settings["network"].get("manual_ip", "")
 
-    # ---------- Персонаж ----------
+    def get_coordinator_address(self):
+        return self.settings.get("coordinator", {}).get("address", "ws://localhost:8770")
+
+    def set_coordinator_address(self, addr):
+        if "coordinator" not in self.settings:
+            self.settings["coordinator"] = {}
+        self.settings["coordinator"]["address"] = addr.strip()
+        self.save_settings()
+
+    def get_use_public(self):
+        return self.settings.get("coordinator", {}).get("use_public", False)
+
+    def set_use_public(self, value):
+        if "coordinator" not in self.settings:
+            self.settings["coordinator"] = {}
+        self.settings["coordinator"]["use_public"] = value
+        self.save_settings()
+
+    # ---------- Персонаж (файловая ссылка) ----------
     def set_player_character_file(self, file_name):
         self.settings["player_character_file"] = file_name
         self.save_settings()
@@ -99,7 +123,7 @@ class Config:
             return self.load_character(file_name)
         return ""
 
-    # ---------- Управление персонажами ----------
+    # ---------- Управление персонажами (текст) ----------
     def list_characters(self):
         files = list(self.characters_dir.glob("*.txt")) + list(self.characters_dir.glob("*.md"))
         names = {f.stem for f in files}
@@ -126,7 +150,7 @@ class Config:
                 return True
         return False
 
-    # ---------- Характеристики ----------
+    # ---------- Характеристики персонажей ----------
     def get_character_stats(self, name):
         path = self.characters_dir / (name + ".stats.json")
         if path.exists():
@@ -166,7 +190,34 @@ class Config:
         self.settings["dev_password"] = pwd
         self.save_settings()
 
-    # ---------- Миры ----------
+    # ---------- Друзья ----------
+    def load_friends(self):
+        if self.friends_file.exists():
+            with open(self.friends_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return {}
+
+    def save_friends(self, friends):
+        with open(self.friends_file, 'w', encoding='utf-8') as f:
+            json.dump(friends, f, indent=2, ensure_ascii=False)
+
+    def add_friend(self, nickname, ip):
+        friends = self.load_friends()
+        friends[nickname] = ip
+        self.save_friends(friends)
+
+    def remove_friend(self, nickname):
+        friends = self.load_friends()
+        if nickname in friends:
+            del friends[nickname]
+            self.save_friends(friends)
+            return True
+        return False
+
+    def get_friends(self):
+        return self.load_friends()
+
+    # ---------- Управление мирами ----------
     def list_worlds(self):
         files = list(self.worlds_dir.glob("*.txt")) + list(self.worlds_dir.glob("*.md"))
         names = {f.stem for f in files}

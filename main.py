@@ -1,5 +1,5 @@
 """
-main.py - Главное меню с редактором персонажей/миров, выбором цвета, характеристиками и паролем разработчика
+main.py – Главное меню с друзьями, отладкой, онлайн-игрой и всеми настройками
 """
 import sys
 import os
@@ -23,26 +23,40 @@ class MainMenu:
             try:
                 self.ui.clear_screen()
                 self.ui.print_header("СЕТЕВАЯ ТЕКСТОВАЯ RPG С ИИ-РАССКАЗЧИКОМ")
-                self.ui.print_menu([
+                menu_items = [
                     "Создать комнату (стать администратором)",
                     "Подключиться к комнате (стать игроком)",
+                    "Найти локальные сервера",
+                    "Онлайн игра",
                     "Настройки",
                     "Управление персонажами",
                     "Управление мирами",
-                    "Выход"
-                ])
+                    "Друзья"
+                ]
+                if self.config.get_dev_password():
+                    menu_items.append("Отладка (режим разработчика)")
+                menu_items.append("Выход")
+                self.ui.print_menu(menu_items)
                 choice = self.ui.get_input("Выберите действие")
                 if choice == "1":
                     self.create_room()
                 elif choice == "2":
                     self.join_room()
                 elif choice == "3":
-                    self.settings_menu()
+                    self.find_servers()
                 elif choice == "4":
-                    self.character_manager()
+                    self.online_menu()
                 elif choice == "5":
-                    self.world_manager()
+                    self.settings_menu()
                 elif choice == "6":
+                    self.character_manager()
+                elif choice == "7":
+                    self.world_manager()
+                elif choice == "8":
+                    self.friends_menu()
+                elif choice == "9" and self.config.get_dev_password():
+                    self.debug_menu()
+                elif choice == str(len(menu_items)):
                     self.ui.print_info("До новых приключений!")
                     sys.exit(0)
                 else:
@@ -56,7 +70,44 @@ class MainMenu:
                 traceback.print_exc()
                 input("Нажмите Enter...")
 
-    # ---- СОЗДАНИЕ КОМНАТЫ ----
+    # ------------------------------------------------------------
+    # МЕНЮ ОТЛАДКИ
+    # ------------------------------------------------------------
+    def debug_menu(self):
+        while True:
+            self.ui.clear_screen()
+            self.ui.print_header("РЕЖИМ РАЗРАБОТЧИКА")
+            self.ui.print_menu([
+                "Показать текущий пароль разработчика",
+                "Очистить пароль разработчика",
+                "Вернуться в главное меню"
+            ], title="")
+            choice = self.ui.get_input(">")
+            if choice == "1":
+                pwd = self.config.get_dev_password()
+                if pwd:
+                    self.ui.print_info(f"Текущий пароль: {pwd}")
+                else:
+                    self.ui.print_warning("Пароль не задан.")
+                input("Нажмите Enter...")
+            elif choice == "2":
+                if self.ui.get_input("Удалить пароль разработчика? (y/n)").lower() == 'y':
+                    self.config.set_dev_password("")
+                    self.ui.print_success("Пароль удалён. Режим разработчика отключён.")
+                    input("Нажмите Enter...")
+                    break
+                else:
+                    self.ui.print_info("Отмена.")
+                    input("Нажмите Enter...")
+            elif choice == "3":
+                break
+            else:
+                self.ui.print_error("Неверный выбор")
+                input("Нажмите Enter...")
+
+    # ------------------------------------------------------------
+    # СОЗДАНИЕ КОМНАТЫ
+    # ------------------------------------------------------------
     def create_room(self):
         try:
             from server import RPGGameServer
@@ -85,7 +136,9 @@ class MainMenu:
             traceback.print_exc()
         input("Нажмите Enter для возврата...")
 
-    # ---- ПОДКЛЮЧЕНИЕ ----
+    # ------------------------------------------------------------
+    # ПОДКЛЮЧЕНИЕ
+    # ------------------------------------------------------------
     def join_room(self):
         try:
             from client import RPGGameClient
@@ -112,7 +165,153 @@ class MainMenu:
             self.ui.print_error(f"Ошибка подключения: {e}")
         input("Нажмите Enter для возврата...")
 
-    # ---- НАСТРОЙКИ ----
+    # ------------------------------------------------------------
+    # ПОИСК СЕРВЕРОВ
+    # ------------------------------------------------------------
+    def find_servers(self):
+        self.ui.clear_screen()
+        self.ui.print_header("ПОИСК СЕРВЕРОВ")
+        try:
+            from client import RPGGameClient
+            client = RPGGameClient()
+            servers = asyncio.run(client.discover_servers())
+            if not servers:
+                self.ui.print_warning("Серверы не найдены.")
+                input("Нажмите Enter...")
+                return
+            self.ui.print_info("Найденные серверы:")
+            for i, srv in enumerate(servers, 1):
+                status = "Игра идёт" if srv.get("game_started") else "В лобби"
+                self.ui.print_colored(
+                    f"{i}. {srv['room_name']} | {srv['ip']} | {srv.get('network_type','?')} | "
+                    f"Игроков: {srv['players']}/{srv['max_players']} | {status}",
+                    Fore.CYAN
+                )
+            while True:
+                choice = self.ui.get_input("\nВведите номер сервера (0 - назад, P - посмотреть игроков):")
+                if choice == "0":
+                    break
+                if choice.upper() == "P":
+                    try:
+                        idx = int(self.ui.get_input("Номер сервера для просмотра:")) - 1
+                        if 0 <= idx < len(servers):
+                            addr = servers[idx]['address']
+                            players = asyncio.run(client.get_server_players(addr))
+                            if players:
+                                self.ui.print_info("Игроки на сервере:")
+                                for p in players:
+                                    self.ui.print_colored(f"  - {p}", Fore.CYAN)
+                            else:
+                                self.ui.print_warning("Не удалось получить список игроков.")
+                    except ValueError:
+                        self.ui.print_error("Неверный номер")
+                    continue
+                try:
+                    idx = int(choice) - 1
+                    if 0 <= idx < len(servers):
+                        addr = servers[idx]['address']
+                        self.join_room_with_address(addr)
+                        break
+                    else:
+                        self.ui.print_error("Неверный номер")
+                except ValueError:
+                    self.ui.print_error("Введите число")
+        except Exception as e:
+            self.ui.print_error(f"Ошибка поиска: {e}")
+        input("Нажмите Enter...")
+
+    def join_room_with_address(self, address):
+        try:
+            from client import RPGGameClient
+            client = RPGGameClient()
+            character_text = self.config.load_player_character_text()
+            if not character_text:
+                self.ui.print_warning("Персонаж не выбран!")
+                self.select_character()
+                character_text = self.config.load_player_character_text()
+            if not character_text:
+                self.ui.print_error("Не удалось загрузить персонажа.")
+                return
+            player_name = self.ui.get_input("Имя вашего персонажа")
+            dev_password = self.config.get_dev_password()
+            asyncio.run(client.join_room(
+                player_name=player_name,
+                server_address=address,
+                character_desc=character_text,
+                player_color=self.config.settings.get("player_color", "WHITE"),
+                dev_password=dev_password
+            ))
+        except Exception as e:
+            self.ui.print_error(f"Ошибка подключения: {e}")
+
+    # ------------------------------------------------------------
+    # ОНЛАЙН ИГРА
+    # ------------------------------------------------------------
+    def online_menu(self):
+        while True:
+            self.ui.clear_screen()
+            self.ui.print_header("ОНЛАЙН ИГРА")
+            self.ui.print_menu([
+                "Поиск публичных комнат",
+                "Создать публичную комнату",
+                "Назад"
+            ], title="")
+            choice = self.ui.get_input(">")
+            if choice == "1":
+                self.find_public_rooms()
+            elif choice == "2":
+                self.config.set_use_public(True)
+                self.create_room()
+                self.config.set_use_public(False)
+            elif choice == "3":
+                break
+            else:
+                self.ui.print_error("Неверный выбор")
+            if choice != "3":
+                input("Нажмите Enter...")
+
+    def find_public_rooms(self):
+        self.ui.clear_screen()
+        self.ui.print_header("ПУБЛИЧНЫЕ КОМНАТЫ")
+        coordinator = self.config.get_coordinator_address()
+        self.ui.print_info(f"Координатор: {coordinator}")
+        try:
+            from client import RPGGameClient
+            client = RPGGameClient()
+            rooms = asyncio.run(client.get_public_rooms(coordinator))
+            if not rooms:
+                self.ui.print_warning("Нет доступных публичных комнат.")
+                input("Нажмите Enter...")
+                return
+            self.ui.print_info("Доступные публичные комнаты:")
+            for i, room in enumerate(rooms, 1):
+                status = "Игра идёт" if room.get("game_started") else "В лобби"
+                self.ui.print_colored(
+                    f"{i}. {room['room_name']} | {room['ip']}:{room['port']} | "
+                    f"Игроков: {room['players']}/{room['max_players']} | {status}",
+                    Fore.CYAN
+                )
+            while True:
+                choice = self.ui.get_input("\nВведите номер комнаты (0 - назад):")
+                if choice == "0":
+                    break
+                try:
+                    idx = int(choice) - 1
+                    if 0 <= idx < len(rooms):
+                        addr = f"ws://{rooms[idx]['ip']}:{rooms[idx]['port']}"
+                        self.join_room_with_address(addr)
+                        break
+                    else:
+                        self.ui.print_error("Неверный номер")
+                except ValueError:
+                    self.ui.print_error("Введите число")
+        except Exception as e:
+            self.ui.print_error(f"Ошибка: {e}")
+        input("Нажмите Enter...")
+
+    # ------------------------------------------------------------
+    # НАСТРОЙКИ
+    # ------------------------------------------------------------
     def settings_menu(self):
         while True:
             self.ui.clear_screen()
@@ -121,11 +320,11 @@ class MainMenu:
                 "Настройки модели Ollama",
                 "Выбрать персонажа",
                 "Выбрать цвет игрока",
-                "Сетевые настройки (IP вручную)",
+                "Сетевые настройки (IP, дружба, координатор)",
                 "Управление характеристиками (шаблон)",
                 "Пароль разработчика",
                 "Назад"
-            ])
+            ], title="")
             choice = self.ui.get_input(">")
             if choice == "1":
                 self.ollama_settings()
@@ -155,7 +354,7 @@ class MainMenu:
                 "Изменить температуру",
                 "Загрузить промпт рассказчика",
                 "Назад"
-            ])
+            ], title="")
             ch = self.ui.get_input(">")
             if ch == "1":
                 model = self.ui.get_input("Название модели")
@@ -195,14 +394,41 @@ class MainMenu:
     def network_settings(self):
         self.ui.clear_screen()
         self.ui.print_header("СЕТЕВЫЕ НАСТРОЙКИ")
-        current = self.config.get_manual_ip()
-        self.ui.print_info(f"Текущий ручной IP: {current if current else 'автоопределение'}")
-        new_ip = self.ui.get_input("Введите IP (оставьте пустым для автоопределения):")
-        self.config.set_manual_ip(new_ip)
-        if new_ip.strip():
-            self.ui.print_success(f"Установлен IP: {new_ip}")
+        current_ip = self.config.get_manual_ip()
+        allow = self.config.settings.get("allow_friend_requests", True)
+        coordinator = self.config.get_coordinator_address()
+        use_public = self.config.get_use_public()
+        self.ui.print_info(f"Ручной IP: {current_ip if current_ip else 'авто'}")
+        self.ui.print_info(f"Принимать запросы дружбы: {'да' if allow else 'нет'}")
+        self.ui.print_info(f"Координатор: {coordinator}")
+        self.ui.print_info(f"Публичные комнаты: {'включены' if use_public else 'выключены'}")
+        self.ui.print_menu([
+            "Изменить ручной IP",
+            "Переключить приём запросов дружбы",
+            "Настроить адрес координатора",
+            "Включить/выключить публичные комнаты",
+            "Назад"
+        ], title="")
+        choice = self.ui.get_input(">")
+        if choice == "1":
+            new_ip = self.ui.get_input("Введите IP (пусто – авто):")
+            self.config.set_manual_ip(new_ip)
+            self.ui.print_success("Сохранено.")
+        elif choice == "2":
+            self.config.settings["allow_friend_requests"] = not allow
+            self.config.save_settings()
+            self.ui.print_success(f"Приём запросов дружбы: {'включён' if not allow else 'выключен'}")
+        elif choice == "3":
+            new_addr = self.ui.get_input("Адрес координатора (ws://...):")
+            self.config.set_coordinator_address(new_addr)
+            self.ui.print_success(f"Координатор: {new_addr}")
+        elif choice == "4":
+            self.config.set_use_public(not use_public)
+            self.ui.print_success(f"Публичные комнаты: {'включены' if not use_public else 'выключены'}")
+        elif choice == "5":
+            return
         else:
-            self.ui.print_success("Включено автоопределение IP")
+            self.ui.print_error("Неверный выбор")
         input("Нажмите Enter...")
 
     def select_player_color(self):
@@ -224,7 +450,9 @@ class MainMenu:
             self.ui.print_error("Введите число")
         input("Нажмите Enter...")
 
-    # ---- ШАБЛОН ХАРАКТЕРИСТИК ----
+    # ------------------------------------------------------------
+    # ШАБЛОН ХАРАКТЕРИСТИК
+    # ------------------------------------------------------------
     def manage_stats_template(self):
         while True:
             self.ui.clear_screen()
@@ -241,7 +469,7 @@ class MainMenu:
                 "Изменить значение по умолчанию",
                 "Удалить характеристику",
                 "Назад"
-            ])
+            ], title="")
             choice = self.ui.get_input(">")
             if choice == "1":
                 name = self.ui.get_input("Название новой характеристики (англ.):")
@@ -283,7 +511,9 @@ class MainMenu:
                 break
             input("Нажмите Enter...")
 
-    # ---- ПАРОЛЬ РАЗРАБОТЧИКА ----
+    # ------------------------------------------------------------
+    # ПАРОЛЬ РАЗРАБОТЧИКА
+    # ------------------------------------------------------------
     def set_dev_password(self):
         self.ui.clear_screen()
         self.ui.print_header("ПАРОЛЬ РАЗРАБОТЧИКА")
@@ -292,7 +522,7 @@ class MainMenu:
         if current:
             self.ui.print_info("Пароль уже задан. Введите новый или оставьте пустым для удаления.")
         else:
-            self.ui.print_info("Пароль не задан.")
+            self.ui.print_info("Пароль не задан. Введите новый.")
         new_pwd = self.ui.get_password("Введите пароль (скрытый ввод):")
         if new_pwd.strip() == "":
             if current:
@@ -306,7 +536,9 @@ class MainMenu:
             self.ui.print_success("Пароль сохранён.")
         input("Нажмите Enter...")
 
-    # ---- УПРАВЛЕНИЕ ПЕРСОНАЖАМИ (с характеристиками) ----
+    # ------------------------------------------------------------
+    # УПРАВЛЕНИЕ ПЕРСОНАЖАМИ
+    # ------------------------------------------------------------
     def character_manager(self):
         while True:
             self.ui.clear_screen()
@@ -323,7 +555,7 @@ class MainMenu:
                 "Удалить персонажа",
                 "Выбрать персонажа для игры",
                 "Назад"
-            ])
+            ], title="")
             choice = self.ui.get_input(">")
             if choice == "1":
                 self.create_character()
@@ -471,7 +703,9 @@ class MainMenu:
                 self.ui.print_success("Персонаж установлен")
         input("Нажмите Enter...")
 
-    # ---- УПРАВЛЕНИЕ МИРАМИ (без изменений) ----
+    # ------------------------------------------------------------
+    # УПРАВЛЕНИЕ МИРАМИ
+    # ------------------------------------------------------------
     def world_manager(self):
         while True:
             self.ui.clear_screen()
@@ -487,7 +721,7 @@ class MainMenu:
                 "Редактировать мир",
                 "Удалить мир",
                 "Назад"
-            ])
+            ], title="")
             choice = self.ui.get_input(">")
             if choice == "1":
                 self.create_world()
@@ -509,7 +743,8 @@ class MainMenu:
         if not name:
             return
         if name in self.config.list_worlds():
-            if self.ui.get_input("Мир уже существует. Перезаписать? (y/n)").lower() != 'y':
+            ow = self.ui.get_input("Мир уже существует. Перезаписать? (y/n)")
+            if ow.lower() != 'y':
                 return
         content = self.ui.get_multiline_input("Введите описание мира (пустая строка — конец):")
         if content:
@@ -600,6 +835,118 @@ class MainMenu:
                 return self.select_or_create_world()
             else:
                 return self.ui.get_multiline_input("Введите описание мира (пустая строка — конец):")
+
+    # ------------------------------------------------------------
+    # ДРУЗЬЯ
+    # ------------------------------------------------------------
+    def friends_menu(self):
+        while True:
+            self.ui.clear_screen()
+            self.ui.print_header("ДРУЗЬЯ")
+            friends = self.config.get_friends()
+            if friends:
+                self.ui.print_info("Список друзей:")
+                for i, (nick, ip) in enumerate(friends.items(), 1):
+                    online = asyncio.run(self.check_friend_online(ip))
+                    status = "🟢 В сети" if online else "🔴 Не в сети"
+                    self.ui.print_colored(f"{i}. {nick} | {ip} | {status}", Fore.CYAN)
+                self.ui.print_info(f"Всего друзей: {len(friends)}")
+            else:
+                self.ui.print_info("У вас пока нет друзей.")
+            self.ui.print_menu([
+                "Посмотреть сервера друзей",
+                "Удалить друга",
+                "Назад"
+            ], title="")
+            choice = self.ui.get_input(">")
+            if choice == "1":
+                self.view_friends_servers()
+            elif choice == "2":
+                self.delete_friend()
+            elif choice == "3":
+                break
+            else:
+                self.ui.print_error("Неверный выбор")
+            if choice != "3":
+                input("Нажмите Enter...")
+
+    async def check_friend_online(self, ip):
+        from client import RPGGameClient
+        client = RPGGameClient()
+        info = await client.check_friend_online(ip)
+        return info is not None
+
+    def view_friends_servers(self):
+        self.ui.clear_screen()
+        self.ui.print_header("СЕРВЕРА ДРУЗЕЙ")
+        friends = self.config.get_friends()
+        if not friends:
+            self.ui.print_info("Нет друзей для проверки.")
+            input("Нажмите Enter...")
+            return
+        self.ui.print_info("Проверка серверов...")
+        servers = []
+        for nick, ip in friends.items():
+            info = asyncio.run(self._check_friend_server(ip))
+            if info:
+                info['address'] = f"ws://{info['ip']}:{info['port']}"
+                info['friend_nick'] = nick
+                servers.append(info)
+        if not servers:
+            self.ui.print_warning("Ни один друг не запустил сервер.")
+            input("Нажмите Enter...")
+            return
+        self.ui.print_info("Доступные сервера друзей:")
+        for i, srv in enumerate(servers, 1):
+            status = "Игра идёт" if srv.get("game_started") else "В лобби"
+            self.ui.print_colored(
+                f"{i}. {srv['friend_nick']} | {srv['room_name']} | {srv['ip']} | "
+                f"Игроков: {srv['players']}/{srv['max_players']} | {status}",
+                Fore.CYAN
+            )
+        while True:
+            choice = self.ui.get_input("\nВведите номер сервера (0 - назад):")
+            if choice == "0":
+                break
+            try:
+                idx = int(choice) - 1
+                if 0 <= idx < len(servers):
+                    addr = servers[idx]['address']
+                    self.join_room_with_address(addr)
+                    break
+                else:
+                    self.ui.print_error("Неверный номер")
+            except ValueError:
+                self.ui.print_error("Введите число")
+        input("Нажмите Enter...")
+
+    async def _check_friend_server(self, ip):
+        from client import RPGGameClient
+        client = RPGGameClient()
+        return await client.check_friend_online(ip)
+
+    def delete_friend(self):
+        self.ui.clear_screen()
+        self.ui.print_header("УДАЛЕНИЕ ДРУГА")
+        friends = self.config.get_friends()
+        if not friends:
+            self.ui.print_info("Нет друзей для удаления.")
+            input("Нажмите Enter...")
+            return
+        for i, (nick, ip) in enumerate(friends.items(), 1):
+            self.ui.print_colored(f"{i}. {nick}", Fore.CYAN)
+        try:
+            idx = int(self.ui.get_input("Номер для удаления")) - 1
+            if 0 <= idx < len(friends):
+                nick = list(friends.keys())[idx]
+                if self.ui.get_input(f"Удалить '{nick}' из друзей? (y/n)").lower() == 'y':
+                    self.config.remove_friend(nick)
+                    self.ui.print_success(f"'{nick}' удалён.")
+            else:
+                self.ui.print_error("Неверный номер")
+        except ValueError:
+            self.ui.print_error("Введите число")
+        input("Нажмите Enter...")
 
 
 if __name__ == "__main__":
