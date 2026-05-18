@@ -1,10 +1,12 @@
 """
-main.py – Главное меню с друзьями, отладкой, онлайн-игрой и всеми настройками
+main.py – Главное меню с одиночной игрой, командами, поочерёдным режимом и читами
 """
 import sys
 import os
 import asyncio
 import traceback
+import aiohttp
+import re
 from colorama import Fore, Style
 from config import Config
 from utils import ConsoleUI
@@ -24,6 +26,7 @@ class MainMenu:
                 self.ui.clear_screen()
                 self.ui.print_header("СЕТЕВАЯ ТЕКСТОВАЯ RPG С ИИ-РАССКАЗЧИКОМ")
                 menu_items = [
+                    "Одиночная игра",
                     "Создать комнату (стать администратором)",
                     "Подключиться к комнате (стать игроком)",
                     "Найти локальные сервера",
@@ -39,22 +42,24 @@ class MainMenu:
                 self.ui.print_menu(menu_items)
                 choice = self.ui.get_input("Выберите действие")
                 if choice == "1":
-                    self.create_room()
+                    self.single_player_game()
                 elif choice == "2":
-                    self.join_room()
+                    self.create_room()
                 elif choice == "3":
-                    self.find_servers()
+                    self.join_room()
                 elif choice == "4":
-                    self.online_menu()
+                    self.find_servers()
                 elif choice == "5":
-                    self.settings_menu()
+                    self.online_menu()
                 elif choice == "6":
-                    self.character_manager()
+                    self.settings_menu()
                 elif choice == "7":
-                    self.world_manager()
+                    self.character_manager()
                 elif choice == "8":
+                    self.world_manager()
+                elif choice == "9":
                     self.friends_menu()
-                elif choice == "9" and self.config.get_dev_password():
+                elif choice == "10" and self.config.get_dev_password():
                     self.debug_menu()
                 elif choice == str(len(menu_items)):
                     self.ui.print_info("До новых приключений!")
@@ -70,44 +75,268 @@ class MainMenu:
                 traceback.print_exc()
                 input("Нажмите Enter...")
 
-    # ------------------------------------------------------------
-    # МЕНЮ ОТЛАДКИ
-    # ------------------------------------------------------------
-    def debug_menu(self):
-        while True:
-            self.ui.clear_screen()
-            self.ui.print_header("РЕЖИМ РАЗРАБОТЧИКА")
-            self.ui.print_menu([
-                "Показать текущий пароль разработчика",
-                "Очистить пароль разработчика",
-                "Вернуться в главное меню"
-            ], title="")
-            choice = self.ui.get_input(">")
-            if choice == "1":
-                pwd = self.config.get_dev_password()
-                if pwd:
-                    self.ui.print_info(f"Текущий пароль: {pwd}")
-                else:
-                    self.ui.print_warning("Пароль не задан.")
-                input("Нажмите Enter...")
-            elif choice == "2":
-                if self.ui.get_input("Удалить пароль разработчика? (y/n)").lower() == 'y':
-                    self.config.set_dev_password("")
-                    self.ui.print_success("Пароль удалён. Режим разработчика отключён.")
-                    input("Нажмите Enter...")
-                    break
-                else:
-                    self.ui.print_info("Отмена.")
-                    input("Нажмите Enter...")
-            elif choice == "3":
-                break
-            else:
-                self.ui.print_error("Неверный выбор")
-                input("Нажмите Enter...")
+    # =========================================================
+    # ОДИНОЧНАЯ ИГРА (С КОМАНДАМИ, ПООЧЕРЁДНЫМ РЕЖИМОМ, ЧИТАМИ)
+    # =========================================================
+    def single_player_game(self):
+        self.ui.clear_screen()
+        self.ui.print_header("ОДИНОЧНАЯ ИГРА")
+        self.ui.print_info("Настройка ИИ-персонажей.")
 
-    # ------------------------------------------------------------
+        # Режим игры
+        mode_choice = self.ui.get_input("Режим (1 - свободный, 2 - поочерёдный):")
+        turn_mode = "free" if mode_choice == "1" else "turn"
+
+        # Количество ИИ-персонажей
+        while True:
+            try:
+                num = int(self.ui.get_input("Количество ИИ-персонажей (1-4):"))
+                if 1 <= num <= 4:
+                    break
+                self.ui.print_error("Введите число от 1 до 4")
+            except ValueError:
+                self.ui.print_error("Введите число")
+
+        npcs = []
+        for i in range(num):
+            self.ui.print_info(f"\nПерсонаж {i+1}:")
+            name = self.ui.get_input("Имя:")
+            desc = self.ui.get_multiline_input("Описание (пустая строка — конец):")
+            stats = {}
+            if self.ui.get_input("Добавить характеристики? (y/n)").lower() == 'y':
+                template = self.config.load_stats_template()
+                for key, default_val in template.items():
+                    val_input = self.ui.get_input(f"{key} (по умолчанию {default_val}):")
+                    if val_input.strip() == "":
+                        stats[key] = default_val
+                    else:
+                        try:
+                            stats[key] = float(val_input)
+                        except ValueError:
+                            self.ui.print_error("Не число, будет по умолчанию")
+                            stats[key] = default_val
+            npcs.append({"name": name, "description": desc, "stats": stats})
+
+        # Проверка пароля разработчика для читов
+        dev_mode = False
+        dev_pwd = self.config.get_dev_password()
+        if dev_pwd:
+            pwd_input = self.ui.get_password("Введите пароль разработчика (Enter - пропустить):")
+            if pwd_input == dev_pwd:
+                dev_mode = True
+                self.ui.print_success("Режим разработчика активирован!")
+            elif pwd_input:
+                self.ui.print_error("Неверный пароль.")
+        elif self.ui.get_input("Войти как разработчик? (y/n)").lower() == 'y':
+            pwd_input = self.ui.get_password("Введите пароль:")
+            if pwd_input == dev_pwd:
+                dev_mode = True
+                self.ui.print_success("Режим разработчика активирован!")
+
+        # Описание мира
+        self.ui.print_info("\nВыберите мир:")
+        world_description = self.select_or_create_world()
+
+        # Промпт, модель и температура
+        narrator_prompt = self.config.settings["ollama"]["narrator_prompt"]
+        model = self.config.settings["ollama"]["model"]
+        temperature = self.config.settings["ollama"]["temperature"]
+
+        # Системный контекст
+        system_context = f"{narrator_prompt}\n\nМИР:\n{world_description}\n\n"
+        system_context += "ИИ-персонажи:\n"
+        for npc in npcs:
+            system_context += f"- {npc['name']}: {npc['description']}\n"
+            if npc['stats']:
+                stats_str = ", ".join(f"{k}: {v}" for k, v in npc['stats'].items())
+                system_context += f"  Характеристики: {stats_str}\n"
+        system_context += "\nИгрок описывает действия своего персонажа. Отвечай как рассказчик, описывая реакции всех персонажей и развитие событий.\n"
+
+        if turn_mode == "turn":
+            system_context += "Игра идёт в поочерёдном режиме. После действия игрока опиши результат, а затем спроси, что делает следующий персонаж.\n"
+
+        # Запрос вступительной сцены
+        initial_scene = asyncio.run(self._ask_ollama(system_context + "Начни игру с захватывающего вступления.", model, temperature))
+        self.ui.clear_screen()
+        self.ui.print_header("ИГРА НАЧАЛАСЬ!")
+        if dev_mode:
+            self.ui.print_colored("[РЕЖИМ РАЗРАБОТЧИКА АКТИВЕН]", Fore.MAGENTA)
+        self.ui.print_colored(initial_scene + "\n", Fore.WHITE)
+        self.ui.print_info("Вводите действия (/help для списка команд, /quit для выхода)")
+
+        # Игровой цикл
+        while True:
+            action = input("> ").strip()
+            if action.lower() == "/quit":
+                break
+            if not action:
+                continue
+
+            # Обработка команд
+            if action.startswith("/"):
+                self._handle_single_player_command(action, npcs, dev_mode, system_context, model, temperature)
+                continue
+
+            # Обычное действие
+            prompt = system_context + f"\nДЕЙСТВИЕ ИГРОКА: {action}\n"
+            response = asyncio.run(self._ask_ollama(prompt, model, temperature))
+            response = self._process_meta(response, npcs)
+            self.ui.print_colored(f"\nРассказчик:\n{response}\n", Fore.WHITE)
+
+        self.ui.print_info("Игра завершена.")
+        input("Нажмите Enter...")
+
+    def _handle_single_player_command(self, command, npcs, dev_mode, system_context, model, temperature):
+        """Обработка команд в одиночной игре"""
+        parts = command.split()
+        if not parts:
+            return
+        cmd = parts[0].lower()
+
+        if cmd == "/help":
+            self.ui.print_info("Доступные команды:")
+            self.ui.print_info("  /help - эта справка")
+            self.ui.print_info("  /quit - выйти из игры")
+            self.ui.print_info("  /stats [имя] - показать характеристики")
+            self.ui.print_info("  /players - список ИИ-персонажей")
+            self.ui.print_info("  /msg <имя> <текст> - обратиться к персонажу")
+            if dev_mode:
+                self.ui.print_info("  Команды разработчика:")
+                self.ui.print_info("  /setstat <имя> <стат> <значение> - установить стат")
+                self.ui.print_info("  /modstat <имя> <стат> <дельта> - изменить стат")
+                self.ui.print_info("  /event <текст> <название> - вызвать событие")
+                self.ui.print_info("  /mode <free/turn> - сменить режим (не применяется в одиночке)")
+
+        elif cmd == "/stats":
+            if len(parts) > 1:
+                target = parts[1]
+                for npc in npcs:
+                    if npc['name'].lower() == target.lower():
+                        stats = npc.get('stats', {})
+                        if stats:
+                            self.ui.print_colored(f"Характеристики {target}: {stats}", Fore.CYAN)
+                        else:
+                            self.ui.print_info(f"У {target} нет характеристик.")
+                        return
+                self.ui.print_error(f"Персонаж '{target}' не найден.")
+            else:
+                self.ui.print_info("Укажите имя персонажа: /stats <имя>")
+
+        elif cmd == "/players":
+            self.ui.print_info("ИИ-персонажи:")
+            for i, npc in enumerate(npcs, 1):
+                stats_str = ", ".join(f"{k}: {v}" for k, v in npc.get('stats', {}).items()) if npc.get('stats') else "нет"
+                self.ui.print_colored(f"  {i}. {npc['name']} | Статы: {stats_str}", Fore.CYAN)
+
+        elif cmd == "/msg" and len(parts) >= 3:
+            target = parts[1]
+            text = " ".join(parts[2:])
+            found = False
+            for npc in npcs:
+                if npc['name'].lower() == target.lower():
+                    found = True
+                    break
+            if not found:
+                self.ui.print_error(f"Персонаж '{target}' не найден.")
+                return
+            prompt = system_context + f"\nИгрок обращается к {target}: {text}\nОпиши реакцию {target} и окружающих."
+            response = asyncio.run(self._ask_ollama(prompt, model, temperature))
+            response = self._process_meta(response, npcs)
+            self.ui.print_colored(f"\n{target} и окружение:\n{response}\n", Fore.CYAN)
+
+        elif dev_mode and cmd == "/setstat" and len(parts) >= 4:
+            target = parts[1]
+            stat = parts[2]
+            try:
+                value = float(parts[3])
+            except ValueError:
+                self.ui.print_error("Значение должно быть числом")
+                return
+            for npc in npcs:
+                if npc['name'].lower() == target.lower():
+                    if 'stats' not in npc:
+                        npc['stats'] = {}
+                    npc['stats'][stat] = value
+                    self.ui.print_success(f"Стат {stat} персонажа {target} установлен в {value}")
+                    return
+            self.ui.print_error(f"Персонаж '{target}' не найден.")
+
+        elif dev_mode and cmd == "/modstat" and len(parts) >= 4:
+            target = parts[1]
+            stat = parts[2]
+            try:
+                delta = float(parts[3])
+            except ValueError:
+                self.ui.print_error("Дельта должна быть числом")
+                return
+            for npc in npcs:
+                if npc['name'].lower() == target.lower():
+                    if 'stats' not in npc:
+                        npc['stats'] = {}
+                    current = npc['stats'].get(stat, 0)
+                    npc['stats'][stat] = current + delta
+                    self.ui.print_success(f"Стат {stat} персонажа {target} изменён на {delta} (теперь {npc['stats'][stat]})")
+                    return
+            self.ui.print_error(f"Персонаж '{target}' не найден.")
+
+        elif dev_mode and cmd == "/event" and len(parts) >= 3:
+            event_name = parts[-1]
+            event_text = " ".join(parts[1:-1])
+            prompt = system_context + f"\nПРОИСХОДИТ СОБЫТИЕ: {event_name}\n{event_text}\nОпиши результат."
+            response = asyncio.run(self._ask_ollama(prompt, model, temperature))
+            response = self._process_meta(response, npcs)
+            self.ui.print_colored(f"\n⚠ СОБЫТИЕ: {event_name}\n{response}\n", Fore.YELLOW)
+
+        elif dev_mode and cmd == "/mode":
+            self.ui.print_info("В одиночной игре режим задаётся при старте и не может быть изменён.")
+
+        else:
+            self.ui.print_error("Неизвестная команда. /help для списка.")
+
+    async def _ask_ollama(self, prompt, model, temperature):
+        url = "http://localhost:11434/api/generate"
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {"temperature": temperature}
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return data.get("response", "Пустой ответ")
+                    else:
+                        return f"Ошибка HTTP {response.status}"
+        except aiohttp.ClientConnectorError:
+            return "Ошибка: Ollama не запущена (порт 11434)."
+        except Exception as e:
+            return f"Ошибка связи с Ollama: {str(e)}"
+
+    def _process_meta(self, text, npcs):
+        """Удаляет метакоманды [[setstat:имя:стат:значение]] и применяет их к npcs."""
+        pattern = r'\[\[(.*?)\]\]'
+        for cmd_str in re.findall(pattern, text):
+            parts = cmd_str.split(':')
+            if len(parts) >= 4 and parts[0] == 'setstat':
+                target = parts[1]
+                stat = parts[2]
+                try:
+                    value = float(parts[3])
+                except ValueError:
+                    continue
+                for npc in npcs:
+                    if npc['name'].lower() == target.lower():
+                        if 'stats' not in npc:
+                            npc['stats'] = {}
+                        npc['stats'][stat] = value
+                        break
+        return re.sub(r'\[\[.*?\]\]', '', text).strip()
+
+    # =========================================================
     # СОЗДАНИЕ КОМНАТЫ
-    # ------------------------------------------------------------
+    # =========================================================
     def create_room(self):
         try:
             from server import RPGGameServer
@@ -136,9 +365,9 @@ class MainMenu:
             traceback.print_exc()
         input("Нажмите Enter для возврата...")
 
-    # ------------------------------------------------------------
+    # =========================================================
     # ПОДКЛЮЧЕНИЕ
-    # ------------------------------------------------------------
+    # =========================================================
     def join_room(self):
         try:
             from client import RPGGameClient
@@ -165,9 +394,9 @@ class MainMenu:
             self.ui.print_error(f"Ошибка подключения: {e}")
         input("Нажмите Enter для возврата...")
 
-    # ------------------------------------------------------------
+    # =========================================================
     # ПОИСК СЕРВЕРОВ
-    # ------------------------------------------------------------
+    # =========================================================
     def find_servers(self):
         self.ui.clear_screen()
         self.ui.print_header("ПОИСК СЕРВЕРОВ")
@@ -244,9 +473,9 @@ class MainMenu:
         except Exception as e:
             self.ui.print_error(f"Ошибка подключения: {e}")
 
-    # ------------------------------------------------------------
+    # =========================================================
     # ОНЛАЙН ИГРА
-    # ------------------------------------------------------------
+    # =========================================================
     def online_menu(self):
         while True:
             self.ui.clear_screen()
@@ -309,9 +538,9 @@ class MainMenu:
             self.ui.print_error(f"Ошибка: {e}")
         input("Нажмите Enter...")
 
-    # ------------------------------------------------------------
+    # =========================================================
     # НАСТРОЙКИ
-    # ------------------------------------------------------------
+    # =========================================================
     def settings_menu(self):
         while True:
             self.ui.clear_screen()
@@ -450,9 +679,9 @@ class MainMenu:
             self.ui.print_error("Введите число")
         input("Нажмите Enter...")
 
-    # ------------------------------------------------------------
+    # =========================================================
     # ШАБЛОН ХАРАКТЕРИСТИК
-    # ------------------------------------------------------------
+    # =========================================================
     def manage_stats_template(self):
         while True:
             self.ui.clear_screen()
@@ -511,9 +740,9 @@ class MainMenu:
                 break
             input("Нажмите Enter...")
 
-    # ------------------------------------------------------------
+    # =========================================================
     # ПАРОЛЬ РАЗРАБОТЧИКА
-    # ------------------------------------------------------------
+    # =========================================================
     def set_dev_password(self):
         self.ui.clear_screen()
         self.ui.print_header("ПАРОЛЬ РАЗРАБОТЧИКА")
@@ -536,9 +765,9 @@ class MainMenu:
             self.ui.print_success("Пароль сохранён.")
         input("Нажмите Enter...")
 
-    # ------------------------------------------------------------
+    # =========================================================
     # УПРАВЛЕНИЕ ПЕРСОНАЖАМИ
-    # ------------------------------------------------------------
+    # =========================================================
     def character_manager(self):
         while True:
             self.ui.clear_screen()
@@ -703,9 +932,9 @@ class MainMenu:
                 self.ui.print_success("Персонаж установлен")
         input("Нажмите Enter...")
 
-    # ------------------------------------------------------------
+    # =========================================================
     # УПРАВЛЕНИЕ МИРАМИ
-    # ------------------------------------------------------------
+    # =========================================================
     def world_manager(self):
         while True:
             self.ui.clear_screen()
@@ -836,9 +1065,9 @@ class MainMenu:
             else:
                 return self.ui.get_multiline_input("Введите описание мира (пустая строка — конец):")
 
-    # ------------------------------------------------------------
+    # =========================================================
     # ДРУЗЬЯ
-    # ------------------------------------------------------------
+    # =========================================================
     def friends_menu(self):
         while True:
             self.ui.clear_screen()
@@ -947,6 +1176,41 @@ class MainMenu:
         except ValueError:
             self.ui.print_error("Введите число")
         input("Нажмите Enter...")
+
+    # =========================================================
+    # ОТЛАДКА
+    # =========================================================
+    def debug_menu(self):
+        while True:
+            self.ui.clear_screen()
+            self.ui.print_header("РЕЖИМ РАЗРАБОТЧИКА")
+            self.ui.print_menu([
+                "Показать текущий пароль разработчика",
+                "Очистить пароль разработчика",
+                "Вернуться в главное меню"
+            ], title="")
+            choice = self.ui.get_input(">")
+            if choice == "1":
+                pwd = self.config.get_dev_password()
+                if pwd:
+                    self.ui.print_info(f"Текущий пароль: {pwd}")
+                else:
+                    self.ui.print_warning("Пароль не задан.")
+                input("Нажмите Enter...")
+            elif choice == "2":
+                if self.ui.get_input("Удалить пароль разработчика? (y/n)").lower() == 'y':
+                    self.config.set_dev_password("")
+                    self.ui.print_success("Пароль удалён. Режим разработчика отключён.")
+                    input("Нажмите Enter...")
+                    break
+                else:
+                    self.ui.print_info("Отмена.")
+                    input("Нажмите Enter...")
+            elif choice == "3":
+                break
+            else:
+                self.ui.print_error("Неверный выбор")
+                input("Нажмите Enter...")
 
 
 if __name__ == "__main__":

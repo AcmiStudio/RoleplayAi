@@ -30,6 +30,16 @@ def get_local_ip():
                                     encoding="cp866", errors="replace")
             output = result.stdout
             adapters = re.split(r'\r?\n(?=\S)', output)
+            # Приоритет Radmin VPN (26.x.x.x)
+            for adapter in adapters:
+                if any(skip in adapter.lower() for skip in
+                       ["virtual", "vmware", "virtualbox", "hyper-v", "bluetooth", "loopback"]):
+                    continue
+                ip_match = re.search(r'IPv4[^:]*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)', adapter)
+                if ip_match:
+                    ip = ip_match.group(1)
+                    if ip.startswith("26."):
+                        return ip
             for adapter in adapters:
                 if any(skip in adapter.lower() for skip in
                        ["virtual", "vmware", "virtualbox", "hyper-v", "bluetooth", "loopback"]):
@@ -56,6 +66,24 @@ def get_local_ip():
         except:
             return "127.0.0.1"
     else:
+        # Linux / Android (Termux)
+        # Сначала ищем IP на интерфейсах точки доступа (ap0, wlan0)
+        try:
+            for iface in ["ap0", "wlan0"]:
+                result = subprocess.run(
+                    ["ip", "addr", "show", iface],
+                    capture_output=True, text=True, timeout=5
+                )
+                if result.returncode == 0:
+                    for line in result.stdout.split('\n'):
+                        if 'inet ' in line:
+                            ip = line.strip().split()[1].split('/')[0]
+                            if not ip.startswith("127."):
+                                return ip
+        except:
+            pass
+
+        # Потом ищем на любом активном интерфейсе (UP)
         try:
             result = subprocess.run(["ip", "-o", "addr", "show", "up"], capture_output=True, text=True, timeout=5)
             if result.returncode == 0:
@@ -69,6 +97,8 @@ def get_local_ip():
                                     return ip
         except:
             pass
+
+        # Запасной вариант: hostname -I
         try:
             result = subprocess.run(["hostname", "-I"], capture_output=True, text=True, timeout=5)
             if result.returncode == 0:
@@ -80,6 +110,7 @@ def get_local_ip():
                     return ips[0]
         except:
             pass
+
         return "127.0.0.1"
 
 def get_network_type(ip):
@@ -166,34 +197,42 @@ class RPGGameServer:
     async def coordinator_register(self):
         addr = self.config.get_coordinator_address()
         self.ui.print_info(f"Регистрация на координаторе {addr}...")
-        try:
-            async with websockets.connect(addr) as ws:
-                await ws.send(json.dumps({
-                    "action": "register",
-                    "room_name": self.room_name,
-                    "ip": self.local_ip,
-                    "port": 8765,
-                    "network_type": self.network_type,
-                    "players": len(self.clients),
-                    "max_players": self.max_players,
-                    "game_started": self.game_started
-                }))
-                resp = await ws.recv()
-                data = json.loads(resp)
-                if data.get("status") == "ok":
-                    self.ui.print_success(f"Комната зарегистрирована как публичная (ID: {data.get('room_id')})")
-                while True:
-                    await asyncio.sleep(10)
+        while True:
+            try:
+                async with websockets.connect(addr) as ws:
                     await ws.send(json.dumps({
-                        "action": "update",
+                        "action": "register",
+                        "room_name": self.room_name,
                         "ip": self.local_ip,
                         "port": 8765,
+                        "network_type": self.network_type,
                         "players": len(self.clients),
+                        "max_players": self.max_players,
                         "game_started": self.game_started
                     }))
-                    await ws.recv()
-        except Exception as e:
-            self.ui.print_warning(f"Не удалось подключиться к координатору: {e}")
+                    resp = await ws.recv()
+                    data = json.loads(resp)
+                    if data.get("status") == "ok":
+                        self.ui.print_success("Комната зарегистрирована как публичная")
+                    while True:
+                        await asyncio.sleep(10)
+                        try:
+                            await ws.send(json.dumps({
+                                "action": "update",
+                                "ip": self.local_ip,
+                                "port": 8765,
+                                "players": len(self.clients),
+                                "game_started": self.game_started
+                            }))
+                            await ws.recv()
+                        except websockets.exceptions.ConnectionClosed:
+                            self.ui.print_warning("Соединение с координатором потеряно, переподключение...")
+                            break
+            except (websockets.exceptions.ConnectionClosed, OSError, asyncio.TimeoutError) as e:
+                self.ui.print_warning(f"Ошибка связи с координатором: {e}. Повтор через 10 сек.")
+            except Exception as e:
+                self.ui.print_warning(f"Неизвестная ошибка: {e}. Повтор через 10 сек.")
+            await asyncio.sleep(10)
 
     async def coordinator_unregister(self):
         try:
